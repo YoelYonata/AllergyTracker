@@ -42,24 +42,71 @@ flowchart TD
 ## Repository layout
 
 ```
+infra/template.yaml   # AWS SAM stack: DynamoDB table, ingestion Lambda, schedule, alarm
 services/
-  src/ingest/       # Ingestion Lambda (fetches pollen data, writes to DynamoDB)
-ui/                 # React dashboard
-scripts/            # One-off / exploratory scripts (e.g. sample Pollen API fetch)
-docs/               # Implementation plan and design notes
+  src/ingest/         # Ingestion Lambda
+    handler.py        #   Lambda entry point: fetch -> store -> threshold check
+    pollen_api.py     #   Google Pollen API client + response parsing (pure functions)
+    store.py          #   DynamoDB access; all key construction lives here
+    config.py         #   Env vars + SSM secret resolution
+  tests/              # Unit tests for parsing and threshold logic (no AWS needed)
+ui/                   # React dashboard
+scripts/              # fetch_pollen_sample.py, seed_locations.py
+docs/                 # Design notes
 ```
 
-## Local development
+## Documentation
 
-Ingestion Lambda (Python):
+| Doc | What's in it |
+|-----|--------------|
+| [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) | Phased build-out plan |
+| [`docs/DATA_MODEL.md`](docs/DATA_MODEL.md) | DynamoDB single-table schema and access patterns |
+| [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) | Where the API key goes, env vars, AWS credentials |
+
+## Getting started
+
+### 1. Get a Pollen API key
+
+Enable the **Pollen API** in a Google Cloud project and create an API key. Restrict it to the
+Pollen API only — see [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md).
+
+### 2. See what the API returns
 
 ```bash
-cd services/src/ingest
-pip install -r requirements.txt
-python -m handler   # runs locally; uses a mocked payload if POLLEN_API_URL is unset
+export GOOGLE_POLLEN_API_KEY=your-key
+python scripts/fetch_pollen_sample.py --lat 49.2827 --lng -123.1207
 ```
 
-Web dashboard (React):
+### 3. Run the tests
+
+No AWS account or API key needed — the parsing and threshold logic are pure functions.
+
+```bash
+cd services
+pip install -r requirements.txt
+python -m pytest tests/ -q
+```
+
+### 4. Deploy
+
+```bash
+# Store the key once, as a SecureString
+aws ssm put-parameter --name /allergy-tracker/google-pollen-api-key \
+  --value "$GOOGLE_POLLEN_API_KEY" --type SecureString --overwrite
+
+sam build -t infra/template.yaml
+sam deploy --guided -t infra/template.yaml
+
+# Tell the ingestion job which locations to fetch
+DDB_TABLE_NAME=allergy-tracker python scripts/seed_locations.py
+
+# Trigger a run without waiting for the schedule
+aws lambda invoke --function-name allergy-tracker-ingest /dev/stdout
+```
+
+### 5. Web dashboard (React)
+
+Not built yet — see Phase 5 of the plan.
 
 ```bash
 cd ui
@@ -67,4 +114,15 @@ npm install
 npm run dev
 ```
 
-See [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) for the phased build-out plan.
+## Status
+
+| Phase | State |
+|-------|-------|
+| 0 — Setup, IaC choice (SAM) | Done |
+| 1 — Data model | Done — [`docs/DATA_MODEL.md`](docs/DATA_MODEL.md) |
+| 2 — Ingestion Lambda | Done — needs a real API key to verify end to end |
+| 3 — Email notifier (SES) | Not started — handler returns the alerts it *would* send |
+| 4 — Read API | Not started |
+| 5 — React dashboard | Not started |
+| 6 — Deployment & CI | Partial — SAM template exists, no CI |
+| 7 — Observability | Partial — error alarm in the template |

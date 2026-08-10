@@ -1,3 +1,6 @@
+# Local development / test dependencies.
+# The Lambda deployment package uses services/src/ingest/requirements.txt instead.
 requests
 boto3
 python-dotenv
+pytest

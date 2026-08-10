@@ -1,130 +1,128 @@
-"""Ingestion Lambda handler
+"""Ingestion & anomaly-check Lambda.
 
-This Lambda is written in Python and is intended to run on AWS Lambda.
-It fetches pollen data for a location (default: "vancouver") from a configured
-POLLEN_API_URL (or uses a mocked payload if none is provided), then writes
-a record to DynamoDB table configured in DDB_TABLE_NAME.
+Triggered on a schedule by EventBridge. For every enabled location it:
 
-The module also supports running locally as a small test harness:
-    python -m src.handler
+  1. fetches the pollen forecast from the Google Pollen API,
+  2. writes one DynamoDB item per forecast day (idempotent -- re-runs overwrite),
+  3. checks today's reading against each subscriber's threshold and claims the right to
+     notify them, returning the alerts that should be sent.
 
-Environment variables:
-- POLLEN_API_URL (optional)
-- POLLEN_API_KEY (optional)
-- DDB_TABLE_NAME (optional)
+Actually sending the email is Phase 3 (SES); this function currently returns the alerts it
+would send so the pipeline can be verified end to end first.
 
+Optional event overrides, useful for manual invokes:
+    {"location_id": "vancouver"}   -- process just this one location
+    {"skip_alerts": true}          -- ingest only, no threshold check
+
+Run locally with:  python -m ingest.handler
 """
-import os
 import json
-import time
-from datetime import datetime, timezone
-from decimal import Decimal
+import logging
+import os
+import sys
 
-from dotenv import load_dotenv
-import requests
-import boto3
+try:
+    from . import config, pollen_api
+    from .store import Store
+except ImportError:  # allow `python handler.py` from this directory
+    import config
+    import pollen_api
+    from store import Store
 
-# Load local .env values if present
-load_dotenv()
+logger = logging.getLogger()
+logger.setLevel(os.getenv("LOG_LEVEL", "INFO"))
 
-# Config
-POLLEN_API_URL = os.getenv("POLLEN_API_URL")
-POLLEN_API_KEY = os.getenv("POLLEN_API_KEY")
-DDB_TABLE_NAME = os.getenv("DDB_TABLE_NAME", "pollen_readings")
-DEFAULT_LOCATION = "vancouver"
-
-# Helpers for DynamoDB numeric conversion
-def to_decimal(value):
-    if value is None:
-        return None
-    return Decimal(str(value))
+DEFAULT_THRESHOLD = 3
 
 
-def fetch_pollen_for_location(location_id: str):
-    """Fetch pollen data from external provider or return a mocked payload.
+def process_location(store: Store, location: dict, api_key: str, skip_alerts: bool) -> dict:
+    """Fetch, store, and threshold-check a single location."""
+    location_id = location["location_id"]
 
-    Returns a dict with keys: pollen_level (number), pollen_type (str), raw (dict)
-    """
-    if POLLEN_API_URL:
-        params = {"location": location_id}
-        headers = {}
-        if POLLEN_API_KEY:
-            if "googleapis.com" in POLLEN_API_URL:
-                params["key"] = POLLEN_API_KEY
-            else:
-                headers["Authorization"] = f"Bearer {POLLEN_API_KEY}"
-        resp = requests.get(POLLEN_API_URL, params=params, headers=headers, timeout=10)
-        resp.raise_for_status()
-        content_type = resp.headers.get("Content-Type", "")
-        if "application/json" not in content_type.lower():
-            raise ValueError(
-                f"Expected JSON response from POLLEN_API_URL but got Content-Type={content_type}. "
-                "Please confirm POLLEN_API_URL points at the real API endpoint, not the docs page."
-            )
-        try:
-            payload = resp.json()
-        except ValueError as exc:
-            raise ValueError(
-                f"Failed to parse JSON from POLLEN_API_URL response. Response preview: {resp.text[:500]!r}"
-            ) from exc
-        # TODO: adapt parsing to your provider's payload structure
-        # The following attempts to extract sensible defaults
-        pollen_level = payload.get("pollen_level") or payload.get("level") or 0
-        pollen_type = payload.get("pollen_type") or payload.get("type") or "unknown"
-        return {"pollen_level": pollen_level, "pollen_type": pollen_type, "raw": payload}
+    payload = pollen_api.fetch_forecast(
+        latitude=float(location["latitude"]),
+        longitude=float(location["longitude"]),
+        days=config.FORECAST_DAYS,
+        api_key=api_key,
+    )
+    readings = pollen_api.parse_forecast(payload)
 
-    # Mocked payload for local development
-    now = datetime.now(timezone.utc)
-    mocked = {
-        "timestamp": now.isoformat(),
-        "location": location_id,
-        "pollen_level": 42,  # mock number
-        "pollen_type": "grass",
-        "notes": "mocked payload",
-    }
-    return {"pollen_level": mocked["pollen_level"], "pollen_type": mocked["pollen_type"], "raw": mocked}
+    for reading in readings:
+        store.put_reading(location_id, reading)
 
+    logger.info(
+        "Stored %d readings for %s (max UPI today: %s)",
+        len(readings),
+        location_id,
+        readings[0].get("max_upi") if readings else None,
+    )
 
-class DynamoWriter:
-    def __init__(self, table_name: str):
-        self.table_name = table_name
-        self.ddb = boto3.resource("dynamodb")
-        self.table = self.ddb.Table(table_name)
+    result = {"location_id": location_id, "readings_written": len(readings), "alerts": []}
+    if skip_alerts or not readings:
+        return result
 
-    def write_reading(self, location_id: str, pollen_level, pollen_type, raw_payload: dict):
-        timestamp = datetime.now(timezone.utc).isoformat()
-        item = {
-            "location_id": location_id,
-            "timestamp": timestamp,
-            "pollen_level": to_decimal(pollen_level),
-            "pollen_type": pollen_type,
-            "raw_payload": raw_payload,
-        }
-        # Remove None values (DynamoDB doesn't accept Decimal(None))
-        clean_item = {k: v for k, v in item.items() if v is not None}
-        # Put item
-        resp = self.table.put_item(Item=clean_item)
-        return resp
+    # dailyInfo[0] is today; alerts are about current conditions, not the forecast tail.
+    today_reading = readings[0]
+    today = today_reading["date"]
+
+    for subscriber in store.get_subscribers(location_id):
+        threshold = subscriber.get("threshold", DEFAULT_THRESHOLD)
+        breaches = pollen_api.find_breaches(
+            today_reading,
+            threshold=threshold,
+            pollen_types=subscriber.get("pollen_types"),
+        )
+        if not breaches:
+            continue
+
+        email = subscriber["email"]
+        if not store.claim_notification(location_id, email, today):
+            logger.info("Already notified %s for %s on %s; skipping", email, location_id, today)
+            continue
+
+        result["alerts"].append(
+            {
+                "email": email,
+                "location_id": location_id,
+                "display_name": location.get("display_name", location_id),
+                "date": today,
+                "breaches": breaches,
+            }
+        )
+
+    return result
 
 
-# Lambda handler
 def handler(event, context):
-    """Lambda handler entrypoint
+    event = event or {}
+    skip_alerts = bool(event.get("skip_alerts"))
+    store = Store(config.DDB_TABLE_NAME, ttl_days=config.READING_TTL_DAYS)
+    api_key = config.get_pollen_api_key()
 
-    Sample event (optional): {"location_id": "vancouver"}
-    """
-    location = (event or {}).get("location_id") or DEFAULT_LOCATION
-    result = fetch_pollen_for_location(location)
+    locations = store.get_enabled_locations()
+    if event.get("location_id"):
+        locations = [loc for loc in locations if loc["location_id"] == event["location_id"]]
+        if not locations:
+            raise ValueError(f"No enabled location config found for {event['location_id']!r}")
 
-    writer = DynamoWriter(DDB_TABLE_NAME)
-    resp = writer.write_reading(location, result["pollen_level"], result["pollen_type"], result["raw"])  # noqa: E501
+    results, failures = [], []
+    for location in locations:
+        # One bad location shouldn't stop the others -- a partial run beats no run.
+        try:
+            results.append(process_location(store, location, api_key, skip_alerts))
+        except Exception:
+            logger.exception("Failed to process location %s", location.get("location_id"))
+            failures.append(location.get("location_id"))
 
-    return {"status": "ok", "ddb_response": resp}
+    return {
+        "locations_processed": len(results),
+        "locations_failed": failures,
+        "readings_written": sum(r["readings_written"] for r in results),
+        "alerts": [alert for r in results for alert in r["alerts"]],
+    }
 
 
-# Local run support
 if __name__ == "__main__":
-    print("Running ingestion handler locally (mock mode if POLLEN_API_URL is not set)...")
-    test_event = {"location_id": DEFAULT_LOCATION}
-    out = handler(test_event, None)
-    print(json.dumps(out, default=str, indent=2))
+    logging.basicConfig(level=logging.INFO)
+    event = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {}
+    print(json.dumps(handler(event, None), indent=2, default=str))

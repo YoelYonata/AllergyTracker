@@ -1,2 +1,3 @@
-boto3
 requests
+# boto3 is provided by the Lambda runtime; pinned here only so local runs match.
+boto3

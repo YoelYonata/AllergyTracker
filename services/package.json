@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "lint": "echo \"No lint configured\"",
-    "test": "echo \"No tests configured\"",
+    "test": "python -m pytest tests/ -q",
     "build": "echo \"No build step for Python services\""
   },
   "dependencies": {}
