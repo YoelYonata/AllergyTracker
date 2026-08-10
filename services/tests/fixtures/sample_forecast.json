@@ -1,0 +1,61 @@
+{
+  "regionCode": "CA",
+  "dailyInfo": [
+    {
+      "date": { "year": 2026, "month": 8, "day": 10 },
+      "pollenTypeInfo": [
+        { "code": "GRASS", "displayName": "Grass" },
+        {
+          "code": "TREE",
+          "displayName": "Tree",
+          "inSeason": true,
+          "indexInfo": {
+            "code": "UPI",
+            "displayName": "Universal Pollen Index",
+            "value": 0,
+            "category": "None"
+          }
+        },
+        {
+          "code": "WEED",
+          "displayName": "Weed",
+          "inSeason": false,
+          "indexInfo": {
+            "code": "UPI",
+            "displayName": "Universal Pollen Index",
+            "value": 1,
+            "category": "Very Low"
+          }
+        }
+      ]
+    },
+    {
+      "date": { "year": 2026, "month": 8, "day": 11 },
+      "pollenTypeInfo": [
+        { "code": "GRASS", "displayName": "Grass" },
+        {
+          "code": "TREE",
+          "displayName": "Tree",
+          "inSeason": true,
+          "indexInfo": {
+            "code": "UPI",
+            "displayName": "Universal Pollen Index",
+            "value": 0,
+            "category": "None"
+          }
+        },
+        {
+          "code": "WEED",
+          "displayName": "Weed",
+          "inSeason": false,
+          "indexInfo": {
+            "code": "UPI",
+            "displayName": "Universal Pollen Index",
+            "value": 1,
+            "category": "Very Low"
+          }
+        }
+      ]
+    }
+  ]
+}
