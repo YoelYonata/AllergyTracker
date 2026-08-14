@@ -14,6 +14,12 @@ Parameters:
     Type: String
     Default: /allergy-tracker/google-pollen-api-key
     Description: Name of the SSM SecureString parameter holding the Google Pollen API key.
+  SesSenderEmail:
+    Type: String
+    Description: >
+      Verified SES sender identity used as the "From" address for alert and confirmation
+      emails. Must already be verified (aws ses verify-email-identity) -- see
+      docs/CONFIGURATION.md.
   ForecastDays:
     Type: Number
     Default: 3
@@ -82,7 +88,7 @@ Resources:
         PointInTimeRecoveryEnabled: false  # Not worth the cost for regenerable forecast data.
 
   # ---------------------------------------------------------------------------
-  # Ingestion & anomaly-check job
+  # Ingestion job: fetch + store only. Threshold checking is the notify function's job.
   # ---------------------------------------------------------------------------
   IngestFunctionLogGroup:
     Type: AWS::Logs::LogGroup
@@ -98,7 +104,7 @@ Resources:
       FunctionName: allergy-tracker-ingest
       CodeUri: ../services/src/
       Handler: ingest.handler.handler
-      Description: Fetches pollen forecasts, stores readings, and flags threshold breaches.
+      Description: Fetches pollen forecasts and stores readings. Alerting is the notify function's job.
       Environment:
         Variables:
           DDB_TABLE_NAME: !Ref AllergyTrackerTable
@@ -140,6 +146,83 @@ Resources:
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
 
+  # ---------------------------------------------------------------------------
+  # Notifier: reacts to new readings via the table's DynamoDB Stream, checks
+  # subscriber thresholds, sends alert emails via SES.
+  # ---------------------------------------------------------------------------
+  NotifyFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/allergy-tracker-notify
+      RetentionInDays: !Ref LogRetentionDays
+
+  NotifyFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: allergy-tracker-notify
+      CodeUri: ../services/src/
+      Handler: notify.handler.handler
+      Description: Checks new readings against subscriber thresholds and sends SES alerts.
+      Environment:
+        Variables:
+          DDB_TABLE_NAME: !Ref AllergyTrackerTable
+          SES_SENDER_EMAIL: !Ref SesSenderEmail
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AllergyTrackerTable
+        # Stream reads are a separate permission from table reads/writes.
+        - DynamoDBStreamReadPolicy:
+            TableName: !Ref AllergyTrackerTable
+            StreamName: !Select [3, !Split ["/", !GetAtt AllergyTrackerTable.StreamArn]]
+        # Scoped to the one verified sender identity, not all of SES.
+        - Statement:
+            - Effect: Allow
+              Action:
+                - ses:SendEmail
+                - ses:SendRawEmail
+              Resource: !Sub arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/${SesSenderEmail}
+      Events:
+        ReadingStream:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt AllergyTrackerTable.StreamArn
+            StartingPosition: LATEST
+            BatchSize: 10
+            MaximumRetryAttempts: 2
+            # Invoke only for new/updated READING items -- subscriber claim writes and location
+            # config changes hit the same stream but shouldn't wake this function up.
+            FilterCriteria:
+              Filters:
+                - Pattern: '{"eventName": ["INSERT", "MODIFY"], "dynamodb": {"NewImage": {"entity": {"S": ["READING"]}}}}'
+    DependsOn: NotifyFunctionLogGroup
+
+  # ---------------------------------------------------------------------------
+  # Confirm: the double opt-in click target, exposed via a free Lambda Function URL
+  # rather than API Gateway (that's reserved for the real Phase 4 read API).
+  # ---------------------------------------------------------------------------
+  ConfirmFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/allergy-tracker-confirm
+      RetentionInDays: !Ref LogRetentionDays
+
+  ConfirmFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: allergy-tracker-confirm
+      CodeUri: ../services/src/
+      Handler: confirm.handler.handler
+      Description: Double opt-in confirmation click target (Function URL, no auth).
+      Environment:
+        Variables:
+          DDB_TABLE_NAME: !Ref AllergyTrackerTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AllergyTrackerTable
+      FunctionUrlConfig:
+        AuthType: NONE
+    DependsOn: ConfirmFunctionLogGroup
+
 Outputs:
   TableName:
     Description: DynamoDB table name
@@ -147,3 +230,9 @@ Outputs:
   IngestFunctionName:
     Description: Ingestion Lambda name (for `sam logs` / manual invoke)
     Value: !Ref IngestFunction
+  NotifyFunctionName:
+    Description: Notifier Lambda name (for `sam logs` / manual invoke)
+    Value: !Ref NotifyFunction
+  ConfirmFunctionUrl:
+    Description: Public URL for the double opt-in confirm link (feed into CONFIRM_BASE_URL)
+    Value: !GetAtt ConfirmFunctionUrl.FunctionUrl

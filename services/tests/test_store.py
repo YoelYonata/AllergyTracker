@@ -1,4 +1,4 @@
-from ingest.store import CONFIG_LOCATIONS_PK, location_pk, reading_sk, subscriber_sk
+from common.store import CONFIG_LOCATIONS_PK, location_pk, reading_sk, subscriber_sk
 
 
 def test_location_pk():

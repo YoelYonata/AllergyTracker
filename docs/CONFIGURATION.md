@@ -76,8 +76,36 @@ Defense in depth, worth doing even though the key is stored safely on the AWS si
 | `GOOGLE_POLLEN_API_KEY` | Local only | One of these two | The API key, in plaintext |
 | `POLLEN_API_KEY_PARAM` | Lambda | One of these two | SSM parameter name holding the key |
 | `DDB_TABLE_NAME` | Both | Yes (defaults to `allergy-tracker`) | DynamoDB table name |
-| `FORECAST_DAYS` | Both | No (default `3`) | Days to fetch per run, 1–5 |
-| `READING_TTL_DAYS` | Both | No (default `365`) | How long readings live before TTL expiry |
+| `FORECAST_DAYS` | Ingest only | No (default `3`) | Days to fetch per run, 1–5 |
+| `READING_TTL_DAYS` | Ingest only | No (default `365`) | How long readings live before TTL expiry |
+| `DEFAULT_THRESHOLD` | Notify only | No (default `3`) | Fallback UPI threshold if a subscriber has none set |
+| `SES_SENDER_EMAIL` | Notify only | Yes | Verified SES identity used as the alert email's "From" address |
+| `CONFIRM_BASE_URL` | Local (`seed_subscriber.py`) only | Yes, to seed a subscriber | The deployed `ConfirmFunction`'s Function URL — see the stack Outputs after `sam deploy` |
+
+## Email sending (SES)
+
+Phase 3 adds two more Lambdas: `notify` (sends alert emails) and `confirm` (the double opt-in
+click target). Before either can actually deliver mail:
+
+1. **Verify a sender identity.** A personal email you control is fine for this project:
+   ```bash
+   aws ses verify-email-identity --email-address you@example.com --region ca-central-1 --profile allergy-tracker
+   ```
+   AWS emails that address a confirmation link — click it before anything will send.
+2. **SES starts in the sandbox.** Until you request production access (not necessary for a
+   personal project), SES will only deliver to *verified* recipients too. Verify your own inbox
+   the same way if you're both the sender and the test subscriber:
+   ```bash
+   aws ses verify-email-identity --email-address you@example.com --region ca-central-1 --profile allergy-tracker
+   ```
+   (Same command — SES treats sender and recipient verification identically; if it's the same
+   address you only need to do this once.)
+3. Pass the verified sender address as the `SesSenderEmail` parameter on `sam deploy`. The
+   template scopes the notify function's SES permission to exactly that one identity ARN, not
+   all of SES — a leaked credential still couldn't send as an arbitrary address.
+4. Sandbox sending is free and plenty for a personal project (SES itself is ~$0.10/1,000 emails
+   either way — see the cost posture note in `IMPLEMENTATION_PLAN.md`). There's no reason to
+   request production access unless you plan on real strangers subscribing.
 
 ## AWS credentials for local runs
 

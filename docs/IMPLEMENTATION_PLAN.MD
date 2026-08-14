@@ -69,22 +69,40 @@ being free:
   DynamoDB items were queried directly and confirmed correct — including `GRASS` stored as
   `upi: null` for a real no-coverage case, not treated as `0`.
 
-## Phase 3 — Email notifier
+## Phase 3 — Email notifier ✅
 
-The ingestion handler already does the threshold check and returns a list of alerts it *would*
-send, and `store.claim_notification()` already handles per-day deduplication. What's left is
-actually sending them.
+**Decoupled design chosen** (the more event-driven of the two options) — `ingest` now only
+fetches and stores; a separate `notify` Lambda reacts to the table's DynamoDB Stream:
 
-- Verify a sender identity in **SES** (starts in the SES sandbox — recipients must also be
-  verified until you request production access).
-- Two options for wiring it up:
-  - Simplest: the ingestion Lambda calls SES directly on the alerts it collected.
-  - More decoupled (better for learning event-driven design): the table already has a
-    **DynamoDB Stream** enabled — have a separate Lambda consume it, check thresholds, and
-    send via SES. Recommended if you want the extra AWS surface area.
-- Keep the email template simple at first: location, date, pollen type(s), UPI value.
-- Add the double opt-in flow: new subscribers start at `status: PENDING` and only move to
-  `CONFIRMED` after clicking a link — `get_subscribers()` already filters to `CONFIRMED` only.
+- `services/src/common/` — code shared by all three Lambdas: `pollen_api.py`, `store.py`,
+  `config.py`, plus a new `ses.py` for sending.
+- `services/src/ingest/handler.py` — trimmed down to fetch + store only.
+- `services/src/notify/handler.py` — triggered by the table's **DynamoDB Stream**, filtered
+  (via the event source's `FilterCriteria`) to only fire on new/updated `READING` items, so
+  subscriber-claim writes on the same stream don't re-trigger it. Checks every confirmed
+  subscriber for that location against the new reading, claims via
+  `store.claim_notification()` (unchanged, still the per-day dedup guard), and sends through
+  SES on a breach.
+- `services/src/confirm/handler.py` — the double opt-in click target. New subscribers are
+  created `PENDING` with a random `confirm_token`
+  (`store.create_pending_subscriber()`); `get_subscribers()` only returns `CONFIRMED` ones, so
+  no alerts go out until this Lambda's conditional update flips the status. Exposed via a
+  **Lambda Function URL** (100% free, no API Gateway) rather than folding it into the Phase 4
+  read API — it's a single public GET route with nothing else in common with that API.
+- Email templates are plain text: location, date, breached type(s), UPI value for alerts;
+  a confirm link for the opt-in email. `scripts/seed_subscriber.py` creates a test `PENDING`
+  subscriber and prints (doesn't email) the confirm link, standing in for the real
+  `POST /subscribe` flow until Phase 4/5 exist.
+- SES: verify a sender identity (`aws ses verify-email-identity`). Starts in the SES sandbox —
+  recipients must also be verified until production access is requested; see
+  `docs/CONFIGURATION.md`. The notify function's IAM policy is scoped to that one sender
+  identity ARN, not all of SES.
+- Verified end to end on the deployed stack: seeded a `PENDING` subscriber, confirmed it
+  through the live `ConfirmFunctionUrl` (including confirming a replayed confirm link
+  correctly 400s as already-used), triggered `ingest`, and watched `notify` pick up the
+  resulting stream records and send real alert emails — independently confirmed via
+  `aws ses get-send-statistics` (delivery attempts count went up by exactly the number of
+  alerts sent, 0 bounces/complaints/rejects), not just trusting the Lambda's own return value.
 
 ## Phase 4 — Read API
 
@@ -205,6 +223,6 @@ stale — while keeping log/metric storage inside the always-free tiers.
 
 ## Suggested order of AWS services introduced
 
-Lambda → EventBridge → DynamoDB → SES → API Gateway → CloudWatch alarms. Each phase above adds
-exactly one or two new pieces, so you're never debugging more than one unfamiliar service at a
-time.
+Lambda → EventBridge → DynamoDB → DynamoDB Streams → SES → Lambda Function URLs → API Gateway →
+CloudWatch alarms. Each phase above adds exactly one or two new pieces, so you're never debugging
+more than one unfamiliar service at a time.

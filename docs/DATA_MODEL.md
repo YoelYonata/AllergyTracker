@@ -123,10 +123,19 @@ gsi1sk = "LOC#vancouver"
 | `location_id` | S | `"vancouver"` | |
 | `threshold` | N | `3` | Alert when any watched type's UPI is `>=` this |
 | `pollen_types` | SS | `["GRASS","TREE"]` | Empty/absent means "all types" |
-| `status` | S | `"CONFIRMED"` | `PENDING` → `CONFIRMED` → `UNSUBSCRIBED` |
-| `unsubscribe_token` | S | `"a3f9..."` | Random token for one-click unsubscribe links |
+| `status` | S | `"PENDING"` | `PENDING` → `CONFIRMED` → `UNSUBSCRIBED` |
+| `confirm_token` | S | `"kQ7z..."` | One-time token; the double opt-in click target checks this |
+| `unsubscribe_token` | S | `"a3f9..."` | Random token for a future one-click unsubscribe link |
 | `created_at` | S | `"2026-08-01T12:00:00Z"` | |
 | `last_notified_date` | S | `"2026-08-09"` | Dedup guard — see below |
+
+**Double opt-in.** `create_pending_subscriber()` writes the item with `status: PENDING` and a
+random `confirm_token`. `get_subscribers()` only ever returns `status: CONFIRMED` items, so a
+`PENDING` subscriber is invisible to the notifier — no alerts go out until
+`confirm_subscriber(location_id, email, token)` succeeds, which is a conditional update requiring
+the token to match *and* the status to still be `PENDING` (so replaying an old confirm link is a
+harmless no-op, not an error). See `services/src/confirm/handler.py`, exposed via a Lambda
+Function URL rather than API Gateway — it's a single public GET endpoint with no other routes.
 
 **`last_notified_date` matters more than it looks.** The ingestion job runs every few hours, so a
 high-pollen day would otherwise fire an alert on every run. Before sending, the notifier does a

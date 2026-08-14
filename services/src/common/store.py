@@ -3,6 +3,7 @@
 All key construction lives here so the single-table key scheme has exactly one source of truth.
 See docs/DATA_MODEL.md for the schema and the access patterns these methods implement.
 """
+import secrets
 import time
 from datetime import datetime, timezone
 
@@ -50,6 +51,13 @@ class Store:
         items = self._query_all(KeyConditionExpression=Key("pk").eq(CONFIG_LOCATIONS_PK))
         return [item for item in items if item.get("enabled", True)]
 
+    def get_location(self, location_id: str) -> dict:
+        """Single location's config item, e.g. for its display_name in an alert email."""
+        response = self.table.get_item(
+            Key={"pk": CONFIG_LOCATIONS_PK, "sk": location_pk(location_id)}
+        )
+        return response.get("Item")
+
     def put_reading(self, location_id: str, reading: dict) -> None:
         """Write one reading, keyed on the forecast date -- re-runs overwrite rather than
         duplicate, which is what makes the ingestion job idempotent."""
@@ -76,6 +84,57 @@ class Store:
             & Key("sk").begins_with("SUB#")
         )
         return [item for item in items if item.get("status") == "CONFIRMED"]
+
+    def create_pending_subscriber(
+        self, location_id: str, email: str, threshold: int, pollen_types=None
+    ) -> dict:
+        """Create a new subscriber in PENDING status with a random confirm token.
+
+        get_subscribers() only ever returns CONFIRMED subscribers, so this subscriber won't
+        receive alerts until confirm_subscriber() is called with the matching token -- the
+        double opt-in this project's design calls for.
+        """
+        confirm_token = secrets.token_urlsafe(24)
+        item = {
+            "pk": location_pk(location_id),
+            "sk": subscriber_sk(email),
+            "gsi1pk": f"EMAIL#{email}",
+            "gsi1sk": location_pk(location_id),
+            "entity": "SUBSCRIBER",
+            "email": email,
+            "location_id": location_id,
+            "threshold": threshold,
+            "status": "PENDING",
+            "confirm_token": confirm_token,
+            "unsubscribe_token": secrets.token_urlsafe(24),
+            "created_at": _utc_now_iso(),
+        }
+        if pollen_types:
+            item["pollen_types"] = set(pollen_types)
+        self.table.put_item(Item=item)
+        return item
+
+    def confirm_subscriber(self, location_id: str, email: str, token: str) -> bool:
+        """Move a subscriber from PENDING to CONFIRMED if the token matches.
+
+        Returns True on success, False if the token is wrong/stale or the subscriber is
+        already confirmed (idempotent: clicking an old confirm link twice just no-ops).
+        """
+        try:
+            self.table.update_item(
+                Key={"pk": location_pk(location_id), "sk": subscriber_sk(email)},
+                UpdateExpression="SET #status = :confirmed",
+                ConditionExpression=(
+                    Attr("confirm_token").eq(token) & Attr("status").eq("PENDING")
+                ),
+                ExpressionAttributeNames={"#status": "status"},
+                ExpressionAttributeValues={":confirmed": "CONFIRMED"},
+            )
+            return True
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                return False
+            raise
 
     def claim_notification(self, location_id: str, email: str, today: str) -> bool:
         """Atomically claim the right to send today's alert to this subscriber.
