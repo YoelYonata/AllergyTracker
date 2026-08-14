@@ -34,7 +34,7 @@ being free:
   ever becomes a real concern, swapping Phase 4's HTTP API for a Function URL is the escape
   hatch.
 
-## Phase 0 — Setup
+## Phase 0 — Setup ✅
 
 - Create/confirm the AWS account and an IAM user or SSO profile with least-privilege access
   (avoid using the root account and avoid broad `AdministratorAccess` long-term).
@@ -43,7 +43,7 @@ being free:
   lives in [`infra/template.yaml`](../infra/template.yaml).
 - `services/`, `ui/`, `docs/`, `scripts/`, `infra/` layout exists in the repo.
 
-## Phase 1 — Explore the Pollen API & design the data model
+## Phase 1 — Explore the Pollen API & design the data model ✅
 
 - `scripts/fetch_pollen_sample.py` prints a raw `forecast:lookup` response so you can confirm
   the shape for your own locations before trusting the parser.
@@ -54,7 +54,7 @@ being free:
   0–5)** meets or exceeds a per-subscriber `threshold` (default 3). Types with no UPI data are
   skipped rather than treated as 0.
 
-## Phase 2 — Ingestion Lambda
+## Phase 2 — Ingestion Lambda ✅
 
 - `services/src/ingest/` now calls the real Pollen API and parses the real response shape:
   - `pollen_api.py` — HTTP client plus pure parsing/threshold functions (unit tested)
@@ -65,7 +65,9 @@ being free:
   re-runs idempotent.
 - Deployed as a Lambda on an **EventBridge schedule** (default `rate(6 hours)` — pollen
   forecasts don't change fast enough to warrant more).
-- Remaining: run it against a real API key and confirm the stored items look right.
+- Verified end to end: deployed to `ca-central-1`, invoked manually, and the 3 resulting
+  DynamoDB items were queried directly and confirmed correct — including `GRASS` stored as
+  `upi: null` for a real no-coverage case, not treated as `0`.
 
 ## Phase 3 — Email notifier
 

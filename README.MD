@@ -115,9 +115,9 @@ npm run dev
 
 | Phase | State |
 |-------|-------|
-| 0 — Setup, IaC choice (SAM) | Done |
+| 0 — Setup, IaC choice (SAM) | Done — IAM identity, SAM CLI, and SSM parameter all verified working |
 | 1 — Data model | Done — [`docs/DATA_MODEL.md`](docs/DATA_MODEL.md), verified against a real API response |
-| 2 — Ingestion Lambda | Code complete, unit tested, fetch verified against the real Pollen API — needs `sam deploy` + a live table to verify the DynamoDB write end to end |
+| 2 — Ingestion Lambda | Done — deployed to `ca-central-1`, invoked live, and the 3 written DynamoDB items were independently queried and confirmed to match the data model (including `GRASS` correctly stored as `upi: null`, not `0`) |
 | 3 — Email notifier (SES) | Not started — handler returns the alerts it *would* send |
 | 4 — Read API | Not started |
 | 5 — React dashboard | Not started |
