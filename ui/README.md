@@ -1,21 +1,29 @@
 UI (ui/)
 =======
 
-Purpose: static SPA to visualize today's pollen for a location and show trend charts, and allow users to subscribe for alerts.
+React + TypeScript SPA (Vite) that visualizes today's pollen for a location, shows a trend
+chart, and lets users subscribe for alerts. Talks only to the Phase 4 Read API
+(`services/src/api/`) -- never touches DynamoDB directly.
 
-Suggested layout:
-- ui/src/             # React app (Vite recommended)
-- ui/package.json
-
-Features:
-- Location selector
-- Today's summary panel and pollen types
-- Trend chart (charting: Chart.js, Recharts, or ApexCharts)
-- Subscription form (email capture + threshold selection)
-
-Hosting:
-- Host as static site on Netlify, Vercel, or S3 + CloudFront.
+Layout:
+- `src/api.ts` -- typed fetch wrapper for the four read/subscribe routes
+- `src/types.ts` -- response shapes, mirrors what `api.handler.py` actually returns
+- `src/theme.ts` -- the three pollen-type colors (validated categorical palette) and
+  light/dark chrome tokens
+- `src/components/` -- `LocationPicker`, `TodaySummary`, `TrendChart` (Recharts), `SubscribeForm`
 
 Local dev:
-- npm install
-- npm run dev
+```
+npm install
+cp .env.example .env.local   # fill in VITE_API_BASE_URL (from `sam deploy` output: ApiEndpoint)
+npm run dev
+```
+
+Build:
+```
+npm run build     # outputs to dist/, ready to sync to S3
+```
+
+Hosting (Phase 6): S3 + CloudFront, per the cost posture note in
+`docs/IMPLEMENTATION_PLAN.MD`. Not deployed yet -- `npm run build` + manual S3 sync until the
+CI job exists.
