@@ -163,12 +163,23 @@ that routes internally. Four routes rather than the three originally planned:
   A Budget alert (`$1`/month, fires at $0.01 actual spend, emails on breach) was already in place
   before this deploy.
 
-## Phase 5 — Web dashboard (React)
+## Phase 5 — Web dashboard (React) — built, not yet hosted
 
-- Scaffold with Vite (see `ui/README.md`, already sketched).
-- Today's view: current pollen levels per type for a selected location.
-- Trend chart: last N days, using Chart.js/Recharts against the history endpoint.
-- Subscribe form: email + location + threshold, posts to `/subscribe`.
+- Vite + React + TypeScript, scaffolded in `ui/` (see `ui/README.md`). `src/api.ts` is the only
+  thing that talks to the backend, calling the Phase 4 Read API -- the browser never touches
+  DynamoDB.
+- Today's view (`TodaySummary`): current UPI + category per pollen type for the selected
+  location.
+- Trend chart (`TrendChart`): last 14 days via `GET /pollen/{location}/history`, built with
+  Recharts. Uses the dataviz skill's validated 3-color categorical palette (one fixed color per
+  pollen type, not cycled), a single 0-5 axis (no dual-axis), legend + tooltip so identity never
+  depends on color alone, and light/dark tokens driven by `prefers-color-scheme`.
+- Subscribe form (`SubscribeForm`): email + threshold, posts to `/subscribe`, surfaces the API's
+  202/error message.
+- Verified with a headless-browser smoke test (Playwright) against the **live deployed API**,
+  light and dark mode, zero console errors -- not just a local mock.
+- **Remaining:** S3 + CloudFront hosting (Phase 6), and narrowing `CorsAllowOrigin` from `*` to
+  that fixed origin once it exists.
 
 ## Phase 6 — Deployment & CI
 
