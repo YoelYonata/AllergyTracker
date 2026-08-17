@@ -104,7 +104,7 @@ fetches and stores; a separate `notify` Lambda reacts to the table's DynamoDB St
   `aws ses get-send-statistics` (delivery attempts count went up by exactly the number of
   alerts sent, 0 bounces/complaints/rejects), not just trusting the Lambda's own return value.
 
-## Phase 4 — Read API — built, not yet deployed
+## Phase 4 — Read API ✅
 
 **API Gateway HTTP API** (not REST — see Cost posture above), fronting a single `api` Lambda
 that routes internally. Four routes rather than the three originally planned:
@@ -151,9 +151,17 @@ that routes internally. Four routes rather than the three originally planned:
 - Unit tests (`services/tests/test_api.py`) cover the pure parts — body/query parsing,
   subscribe validation, date-range math, and the `Decimal`/`set` JSON encoding DynamoDB forces.
 
-**Remaining:** `sam deploy`, then verify the four routes live and confirm a real
-`POST /subscribe` → email → confirm-link round trip, the same way Phases 2 and 3 were verified
-against the deployed stack rather than trusted from local runs.
+- Deployed to the live `allergy-tracker` stack in `ca-central-1` via a reviewed CloudFormation
+  changeset (additive: new `HttpApi` + `ApiFunction`, in-place updates to the other three
+  Lambdas, no data or deletions touched). Verified against the deployed stack: `GET /locations`,
+  `GET /pollen/vancouver/latest`, and `GET /pollen/vancouver/history` all returned real data;
+  `POST /subscribe` against an already-`CONFIRMED` address returned its 202 no-op response and
+  left the DynamoDB item unchanged (same `confirm_token`/`created_at`), confirming the
+  overwrite-guard fix holds in production, not just in unit tests.
+- Teardown/cost-safety: `docs/TEARDOWN.md` documents how to fully delete the stack (`sam delete`)
+  plus the two resources it creates outside CloudFormation (the SSM parameter, the SES identity).
+  A Budget alert (`$1`/month, fires at $0.01 actual spend, emails on breach) was already in place
+  before this deploy.
 
 ## Phase 5 — Web dashboard (React)
 
