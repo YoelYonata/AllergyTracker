@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from ingest import pollen_api
+from common import pollen_api
 
 
 def test_parse_forecast_returns_one_reading_per_day(sample_forecast_payload):

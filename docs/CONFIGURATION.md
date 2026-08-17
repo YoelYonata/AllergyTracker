@@ -76,8 +76,70 @@ Defense in depth, worth doing even though the key is stored safely on the AWS si
 | `GOOGLE_POLLEN_API_KEY` | Local only | One of these two | The API key, in plaintext |
 | `POLLEN_API_KEY_PARAM` | Lambda | One of these two | SSM parameter name holding the key |
 | `DDB_TABLE_NAME` | Both | Yes (defaults to `allergy-tracker`) | DynamoDB table name |
-| `FORECAST_DAYS` | Both | No (default `3`) | Days to fetch per run, 1–5 |
-| `READING_TTL_DAYS` | Both | No (default `365`) | How long readings live before TTL expiry |
+| `FORECAST_DAYS` | Ingest only | No (default `3`) | Days to fetch per run, 1–5 |
+| `READING_TTL_DAYS` | Ingest only | No (default `365`) | How long readings live before TTL expiry |
+| `DEFAULT_THRESHOLD` | Notify + api | No (default `3`) | Fallback UPI threshold if a subscriber has none set |
+| `SES_SENDER_EMAIL` | Notify + api | Yes | Verified SES identity used as the "From" address on alert and confirmation emails |
+| `CONFIRM_BASE_URL` | Api Lambda, and local `seed_subscriber.py` | Yes, to subscribe | The deployed `ConfirmFunction`'s Function URL. The template wires this into the api Lambda automatically; only set it by hand for local script runs — see the stack Outputs after `sam deploy` |
+
+## Read API (Phase 4)
+
+The dashboard talks to an **API Gateway HTTP API** rather than reading DynamoDB from the
+browser. Its base URL is the stack's `ApiEndpoint` output:
+
+```bash
+aws cloudformation describe-stacks --stack-name allergy-tracker \
+  --query "Stacks[0].Outputs[?OutputKey=='ApiEndpoint'].OutputValue" --output text
+```
+
+| Route | Purpose |
+|-------|---------|
+| `GET /locations` | Locations the dashboard's picker offers |
+| `GET /pollen/{location}/latest` | Today's reading for one location |
+| `GET /pollen/{location}/history?days=N` | Trend data; `days` defaults to 14, max 30 |
+| `POST /subscribe` | `{"email", "location", "threshold"?, "pollen_types"?}` — creates a `PENDING` subscriber and emails the confirm link |
+
+**Two template parameters affect it:**
+
+- `CorsAllowOrigin` (default `*`) — the browser origin allowed to call the API. `*` is fine
+  while the dashboard has no fixed domain; the API is public and read-only and sends no cookies
+  or credentials. Narrow it to the CloudFront origin once Phase 6 deploys one:
+  `sam deploy --parameter-overrides CorsAllowOrigin=https://d111111abcdef8.cloudfront.net`
+- Throttling is set in the template, not here: 10 req/s (burst 20) by default and 2 req/s
+  (burst 5) on `POST /subscribe`. Raise these in `infra/template.yaml` if you ever have real
+  traffic — but they're the main thing standing between a public endpoint and an unbounded
+  request bill.
+
+**`POST /subscribe` and the SES sandbox.** The confirmation email goes out through the same
+sandboxed SES identity as the alerts, so while SES is in the sandbox the endpoint will accept a
+subscription from any address but only *deliver* the confirm link to verified ones. That's the
+right failure mode for a personal project — the subscriber just never confirms — but it's worth
+knowing before wondering why a test signup went quiet.
+
+## Email sending (SES)
+
+Phase 3 adds two more Lambdas: `notify` (sends alert emails) and `confirm` (the double opt-in
+click target). Before either can actually deliver mail:
+
+1. **Verify a sender identity.** A personal email you control is fine for this project:
+   ```bash
+   aws ses verify-email-identity --email-address you@example.com --region ca-central-1 --profile allergy-tracker
+   ```
+   AWS emails that address a confirmation link — click it before anything will send.
+2. **SES starts in the sandbox.** Until you request production access (not necessary for a
+   personal project), SES will only deliver to *verified* recipients too. Verify your own inbox
+   the same way if you're both the sender and the test subscriber:
+   ```bash
+   aws ses verify-email-identity --email-address you@example.com --region ca-central-1 --profile allergy-tracker
+   ```
+   (Same command — SES treats sender and recipient verification identically; if it's the same
+   address you only need to do this once.)
+3. Pass the verified sender address as the `SesSenderEmail` parameter on `sam deploy`. The
+   template scopes the notify function's SES permission to exactly that one identity ARN, not
+   all of SES — a leaked credential still couldn't send as an arbitrary address.
+4. Sandbox sending is free and plenty for a personal project (SES itself is ~$0.10/1,000 emails
+   either way — see the cost posture note in `IMPLEMENTATION_PLAN.md`). There's no reason to
+   request production access unless you plan on real strangers subscribing.
 
 ## AWS credentials for local runs
 

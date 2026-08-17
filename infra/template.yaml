@@ -14,6 +14,12 @@ Parameters:
     Type: String
     Default: /allergy-tracker/google-pollen-api-key
     Description: Name of the SSM SecureString parameter holding the Google Pollen API key.
+  SesSenderEmail:
+    Type: String
+    Description: >
+      Verified SES sender identity used as the "From" address for alert and confirmation
+      emails. Must already be verified (aws ses verify-email-identity) -- see
+      docs/CONFIGURATION.md.
   ForecastDays:
     Type: Number
     Default: 3
@@ -24,6 +30,13 @@ Parameters:
     Type: String
     Default: rate(6 hours)
     Description: EventBridge schedule for the ingestion job.
+  CorsAllowOrigin:
+    Type: String
+    Default: "*"
+    Description: >
+      Origin allowed to call the read API from a browser. "*" is fine while the Phase 5
+      dashboard has no fixed domain yet -- the API is public read-only and sends no cookies or
+      credentials. Once CloudFront is up, narrow this to that one origin.
   LogRetentionDays:
     Type: Number
     Default: 30
@@ -82,7 +95,7 @@ Resources:
         PointInTimeRecoveryEnabled: false  # Not worth the cost for regenerable forecast data.
 
   # ---------------------------------------------------------------------------
-  # Ingestion & anomaly-check job
+  # Ingestion job: fetch + store only. Threshold checking is the notify function's job.
   # ---------------------------------------------------------------------------
   IngestFunctionLogGroup:
     Type: AWS::Logs::LogGroup
@@ -98,7 +111,7 @@ Resources:
       FunctionName: allergy-tracker-ingest
       CodeUri: ../services/src/
       Handler: ingest.handler.handler
-      Description: Fetches pollen forecasts, stores readings, and flags threshold breaches.
+      Description: Fetches pollen forecasts and stores readings. Alerting is the notify function's job.
       Environment:
         Variables:
           DDB_TABLE_NAME: !Ref AllergyTrackerTable
@@ -140,10 +153,189 @@ Resources:
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
 
+  # ---------------------------------------------------------------------------
+  # Notifier: reacts to new readings via the table's DynamoDB Stream, checks
+  # subscriber thresholds, sends alert emails via SES.
+  # ---------------------------------------------------------------------------
+  NotifyFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/allergy-tracker-notify
+      RetentionInDays: !Ref LogRetentionDays
+
+  NotifyFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: allergy-tracker-notify
+      CodeUri: ../services/src/
+      Handler: notify.handler.handler
+      Description: Checks new readings against subscriber thresholds and sends SES alerts.
+      Environment:
+        Variables:
+          DDB_TABLE_NAME: !Ref AllergyTrackerTable
+          SES_SENDER_EMAIL: !Ref SesSenderEmail
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AllergyTrackerTable
+        # Stream reads are a separate permission from table reads/writes.
+        - DynamoDBStreamReadPolicy:
+            TableName: !Ref AllergyTrackerTable
+            StreamName: !Select [3, !Split ["/", !GetAtt AllergyTrackerTable.StreamArn]]
+        # Scoped to the one verified sender identity, not all of SES.
+        - Statement:
+            - Effect: Allow
+              Action:
+                - ses:SendEmail
+                - ses:SendRawEmail
+              Resource: !Sub arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/${SesSenderEmail}
+      Events:
+        ReadingStream:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt AllergyTrackerTable.StreamArn
+            StartingPosition: LATEST
+            BatchSize: 10
+            MaximumRetryAttempts: 2
+            # Invoke only for new/updated READING items -- subscriber claim writes and location
+            # config changes hit the same stream but shouldn't wake this function up.
+            FilterCriteria:
+              Filters:
+                - Pattern: '{"eventName": ["INSERT", "MODIFY"], "dynamodb": {"NewImage": {"entity": {"S": ["READING"]}}}}'
+    DependsOn: NotifyFunctionLogGroup
+
+  # ---------------------------------------------------------------------------
+  # Confirm: the double opt-in click target, exposed via a free Lambda Function URL
+  # rather than API Gateway (that's reserved for the real Phase 4 read API).
+  # ---------------------------------------------------------------------------
+  ConfirmFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/allergy-tracker-confirm
+      RetentionInDays: !Ref LogRetentionDays
+
+  ConfirmFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: allergy-tracker-confirm
+      CodeUri: ../services/src/
+      Handler: confirm.handler.handler
+      Description: Double opt-in confirmation click target (Function URL, no auth).
+      Environment:
+        Variables:
+          DDB_TABLE_NAME: !Ref AllergyTrackerTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AllergyTrackerTable
+      FunctionUrlConfig:
+        AuthType: NONE
+    DependsOn: ConfirmFunctionLogGroup
+
+  # ---------------------------------------------------------------------------
+  # Read API: what the Phase 5 dashboard calls. HTTP API, not REST API -- ~3.5x cheaper per
+  # request ($1.00 vs $3.50 per million once the 12-month free tier lapses) and simpler to
+  # define. See the cost posture note in docs/IMPLEMENTATION_PLAN.md.
+  # ---------------------------------------------------------------------------
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      # $default gives URLs with no stage suffix (https://<id>.execute-api.../locations).
+      # One stage: this project has one environment, so a /prod path segment buys nothing.
+      StageName: $default
+      CorsConfiguration:
+        AllowOrigins: [!Ref CorsAllowOrigin]
+        AllowMethods: [GET, POST, OPTIONS]
+        AllowHeaders: [Content-Type]
+        MaxAge: 300
+      # Throttling is the cost guard: this is a public endpoint, and a scraper or a runaway
+      # useEffect in the dashboard is the realistic way request volume runs away here.
+      DefaultRouteSettings:
+        ThrottlingRateLimit: 10
+        ThrottlingBurstLimit: 20
+      RouteSettings:
+        # Tighter still, since each accepted call sends an SES email.
+        "POST /subscribe":
+          ThrottlingRateLimit: 2
+          ThrottlingBurstLimit: 5
+
+  ApiFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/allergy-tracker-api
+      RetentionInDays: !Ref LogRetentionDays
+
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: allergy-tracker-api
+      CodeUri: ../services/src/
+      Handler: api.handler.handler
+      Description: Read API behind the HTTP API - latest/history reads plus the subscribe form.
+      Timeout: 15  # A user is waiting on this one; fail fast rather than hang for the Globals 60s.
+      Environment:
+        Variables:
+          DDB_TABLE_NAME: !Ref AllergyTrackerTable
+          SES_SENDER_EMAIL: !Ref SesSenderEmail
+          # POST /subscribe emails a link pointing at the confirm function.
+          CONFIRM_BASE_URL: !GetAtt ConfirmFunctionUrl.FunctionUrl
+      Policies:
+        # Deliberately not DynamoDBCrudPolicy: that also grants DeleteItem/UpdateItem/Scan,
+        # none of which this function does. A public endpoint gets exactly its three verbs.
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:Query
+                - dynamodb:PutItem
+              Resource: !GetAtt AllergyTrackerTable.Arn
+        - Statement:
+            - Effect: Allow
+              Action:
+                - ses:SendEmail
+                - ses:SendRawEmail
+              Resource: !Sub arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/${SesSenderEmail}
+      Events:
+        ListLocations:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /locations
+            Method: GET
+        GetLatest:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /pollen/{location}/latest
+            Method: GET
+        GetHistory:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /pollen/{location}/history
+            Method: GET
+        Subscribe:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /subscribe
+            Method: POST
+    DependsOn: ApiFunctionLogGroup
+
 Outputs:
+  ApiEndpoint:
+    Description: Base URL of the read API (feed into the dashboard's VITE_API_BASE_URL)
+    Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}
   TableName:
     Description: DynamoDB table name
     Value: !Ref AllergyTrackerTable
   IngestFunctionName:
     Description: Ingestion Lambda name (for `sam logs` / manual invoke)
     Value: !Ref IngestFunction
+  NotifyFunctionName:
+    Description: Notifier Lambda name (for `sam logs` / manual invoke)
+    Value: !Ref NotifyFunction
+  ApiFunctionName:
+    Description: Read API Lambda name (for `sam logs` / manual invoke)
+    Value: !Ref ApiFunction
+  ConfirmFunctionUrl:
+    Description: Public URL for the double opt-in confirm link (feed into CONFIRM_BASE_URL)
+    Value: !GetAtt ConfirmFunctionUrl.FunctionUrl
