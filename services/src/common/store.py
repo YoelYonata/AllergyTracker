@@ -77,38 +77,6 @@ class Store:
             }
         )
 
-    def get_reading(self, location_id: str, date_str: str) -> dict:
-        """Access pattern 2: one specific forecast date for a location."""
-        response = self.table.get_item(
-            Key={"pk": location_pk(location_id), "sk": reading_sk(date_str)}
-        )
-        return response.get("Item")
-
-    def get_latest_reading(self, location_id: str, on_or_before: str) -> dict:
-        """The most recent reading at or before `on_or_before` (normally today).
-
-        Not a GetItem on today's date: readings are keyed on the *forecast* date and the
-        partition also holds future days, so an unbounded "last item" would return the
-        furthest-out forecast instead of today's. Bounding by `sk <= READING#<today>` and
-        reading backwards gives today's reading, or the freshest older one if a run failed.
-        SUB# items can't leak in -- "SUB#" sorts after "READING#", so the bound excludes them.
-        """
-        response = self.table.query(
-            KeyConditionExpression=Key("pk").eq(location_pk(location_id))
-            & Key("sk").lte(reading_sk(on_or_before)),
-            ScanIndexForward=False,
-            Limit=1,
-        )
-        items = response.get("Items", [])
-        return items[0] if items else None
-
-    def get_readings(self, location_id: str, start_date: str, end_date: str) -> list:
-        """Access pattern 3: every reading in an inclusive date range, oldest first."""
-        return self._query_all(
-            KeyConditionExpression=Key("pk").eq(location_pk(location_id))
-            & Key("sk").between(reading_sk(start_date), reading_sk(end_date))
-        )
-
     def get_subscribers(self, location_id: str) -> list:
         """Access pattern 4: confirmed subscribers for one location."""
         items = self._query_all(
@@ -125,12 +93,6 @@ class Store:
         get_subscribers() only ever returns CONFIRMED subscribers, so this subscriber won't
         receive alerts until confirm_subscriber() is called with the matching token -- the
         double opt-in this project's design calls for.
-
-        Returns the new item, or None if this address already has a CONFIRMED subscription for
-        this location. That guard matters now that POST /subscribe is public: without it,
-        posting someone else's address would overwrite their CONFIRMED item back to PENDING and
-        silently stop their alerts. Re-posting while still PENDING is allowed and re-issues the
-        token, which is what makes "resend the confirmation email" work.
         """
         confirm_token = secrets.token_urlsafe(24)
         item = {
@@ -149,18 +111,7 @@ class Store:
         }
         if pollen_types:
             item["pollen_types"] = set(pollen_types)
-
-        try:
-            self.table.put_item(
-                Item=item,
-                ConditionExpression=(
-                    Attr("pk").not_exists() | Attr("status").is_in(["PENDING", "UNSUBSCRIBED"])
-                ),
-            )
-        except ClientError as exc:
-            if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
-                return None
-            raise
+        self.table.put_item(Item=item)
         return item
 
     def confirm_subscriber(self, location_id: str, email: str, token: str) -> bool:
