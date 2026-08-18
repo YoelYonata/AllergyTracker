@@ -10,6 +10,7 @@ import {
 } from "recharts";
 import type { PollenType, Reading } from "../types";
 import { chrome, seriesColor } from "../theme";
+import { POLLEN_ICONS } from "../icons";
 import { useDarkMode } from "../useDarkMode";
 
 const TYPE_ORDER: PollenType[] = ["TREE", "GRASS", "WEED"];
@@ -86,6 +87,23 @@ function ChartTooltip({
   );
 }
 
+function TrendLegend({ isDark }: { isDark: boolean }) {
+  return (
+    <div className="trend-legend">
+      {TYPE_ORDER.map((type) => {
+        const Icon = POLLEN_ICONS[type];
+        const color = seriesColor(type, isDark);
+        return (
+          <span key={type} className="trend-legend__item">
+            <Icon size={18} style={{ color }} />
+            {TYPE_LABEL[type]}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 interface Props {
   readings: Reading[];
 }
@@ -125,7 +143,7 @@ export function TrendChart({ readings }: Props) {
               <ChartTooltip ink={c.textPrimary} secondaryInk={c.textSecondary} surface={c.surface} />
             }
           />
-          <Legend wrapperStyle={{ color: c.textSecondary, fontSize: 13 }} iconType="plainline" />
+          <Legend content={() => <TrendLegend isDark={isDark} />} />
           {TYPE_ORDER.map((type) => (
             <Line
               key={type}

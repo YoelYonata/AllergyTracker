@@ -1,5 +1,6 @@
 import type { PollenType, Reading } from "../types";
 import { seriesColor } from "../theme";
+import { POLLEN_ICONS } from "../icons";
 import { useDarkMode } from "../useDarkMode";
 
 const TYPE_ORDER: PollenType[] = ["TREE", "GRASS", "WEED"];
@@ -29,13 +30,18 @@ export function TodaySummary({ reading }: Props) {
       <div className="today-summary__cards">
         {TYPE_ORDER.map((type) => {
           const t = reading.types[type];
+          const Icon = POLLEN_ICONS[type];
+          const color = seriesColor(type, isDark);
           return (
             <div
               key={type}
               className="today-summary__card"
-              style={{ borderInlineStartColor: seriesColor(type, isDark) }}
+              style={{ borderInlineStartColor: color }}
             >
-              <div className="today-summary__card-label">{t?.display_name ?? type}</div>
+              <div className="today-summary__card-label">
+                <Icon size={22} style={{ color, flexShrink: 0 }} />
+                {t?.display_name ?? type}
+              </div>
               <div className="today-summary__card-value">
                 {t?.upi ?? "--"}
                 <span className="today-summary__card-scale">/5</span>

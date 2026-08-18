@@ -5,6 +5,7 @@ import { LocationPicker } from "./components/LocationPicker";
 import { SubscribeForm } from "./components/SubscribeForm";
 import { TodaySummary } from "./components/TodaySummary";
 import { TrendChart } from "./components/TrendChart";
+import { LogoIcon } from "./icons";
 import type { Location, Reading } from "./types";
 
 export default function App() {
@@ -37,7 +38,13 @@ export default function App() {
   return (
     <div className="app">
       <header className="app__header">
-        <h1>Allergy Tracker</h1>
+        <div className="app__brand">
+          <LogoIcon size={26} className="app__brand-icon" />
+          <div>
+            <h1>Allergy Tracker</h1>
+            <p className="app__tagline">Daily pollen levels &amp; alerts</p>
+          </div>
+        </div>
         {locations.length > 0 && (
           <LocationPicker locations={locations} selected={selected} onChange={setSelected} />
         )}

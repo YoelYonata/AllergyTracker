@@ -7,15 +7,33 @@
 .app__header {
   display: flex;
   justify-content: space-between;
-  align-items: baseline;
-  margin-bottom: 24px;
+  align-items: center;
+  margin-bottom: 28px;
   flex-wrap: wrap;
   gap: 12px;
 }
 
-.app__header h1 {
-  font-size: 1.5em;
+.app__brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.app__brand-icon {
+  color: var(--brand);
+  flex-shrink: 0;
+}
+
+.app__brand h1 {
+  font-size: 1.3em;
+  letter-spacing: -0.01em;
   margin: 0;
+}
+
+.app__tagline {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 0.8em;
 }
 
 .app__error {
@@ -49,7 +67,8 @@
 .subscribe-form {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 12px;
+  box-shadow: var(--shadow);
   padding: 20px;
   margin-bottom: 20px;
 }
@@ -70,12 +89,14 @@
 .trend-chart h2,
 .subscribe-form h2 {
   margin: 0;
-  font-size: 1.1em;
+  font-size: 1.05em;
+  font-weight: 600;
 }
 
 .today-summary__date {
   color: var(--muted);
   font-size: 0.9em;
+  font-variant-numeric: tabular-nums;
 }
 
 .today-summary__cards {
@@ -86,12 +107,15 @@
 
 .today-summary__card {
   border-inline-start: 3px solid var(--baseline);
-  padding: 4px 12px;
+  padding: 6px 12px;
 }
 
 .today-summary__card-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   color: var(--text-secondary);
-  font-size: 0.85em;
+  font-size: 0.9em;
 }
 
 .today-summary__card-value {
@@ -107,6 +131,22 @@
 .today-summary__card-category {
   color: var(--text-secondary);
   font-size: 0.85em;
+}
+
+.trend-legend {
+  display: flex;
+  justify-content: center;
+  gap: 20px;
+  flex-wrap: wrap;
+  padding-top: 6px;
+}
+
+.trend-legend__item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.85em;
+  color: var(--text-secondary);
 }
 
 .subscribe-form {
@@ -139,12 +179,12 @@
 
 .subscribe-form button {
   align-self: flex-start;
-  padding: 8px 20px;
-  border-radius: 6px;
+  padding: 9px 22px;
+  border-radius: 7px;
   border: none;
-  background: #2a78d6;
-  color: #ffffff;
-  font-weight: 500;
+  background: var(--brand);
+  color: var(--brand-ink);
+  font-weight: 600;
 }
 
 .subscribe-form button:disabled {
