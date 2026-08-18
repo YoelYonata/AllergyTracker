@@ -181,13 +181,30 @@ that routes internally. Four routes rather than the three originally planned:
 - Visual/brand pass: hand-drawn per-allergen icons (`src/icons.tsx`) sized for legibility, a
   small brand identity (logo mark, gold accent color, card elevation) so the dashboard reads as
   more than the default Vite starter. Re-verified with the same headless-browser check after.
-- **Remaining:** S3 + CloudFront hosting (Phase 6), and narrowing `CorsAllowOrigin` from `*` to
-  that fixed origin once it exists.
+- **Hosted:** live at **https://d3myi08baazbck.cloudfront.net**, ahead of the rest of Phase 6 —
+  see the hosting note under Phase 6 below. `CorsAllowOrigin` on the backend stack was narrowed
+  from `*` to that exact CloudFront domain once it existed, per the plan below; verified the
+  live site still loads with no console errors after the change.
 
 ## Phase 6 — Deployment & CI
 
 Goal: push a commit to `main` and have both the backend and dashboard deploy themselves, with
 tests gating the merge — no long-lived AWS credentials stored anywhere.
+
+### Dashboard hosting (done, ahead of the rest of this phase)
+
+- `infra/hosting-template.yaml` — a **second, independent CloudFormation stack**
+  (`allergy-tracker-ui`), deliberately separate from the backend stack so either can be torn down
+  without touching the other (see `docs/TEARDOWN.md`). Plain CloudFormation, not a Serverless
+  Transform — S3 and CloudFront aren't serverless-compute resources, so the SAM transform buys
+  nothing here.
+- Private S3 bucket (all public access blocked) + CloudFront distribution reaching it through
+  **Origin Access Control** (the modern replacement for the legacy OAI), so the bucket is never
+  directly reachable.
+- `PriceClass_100` (cheapest edge tier) and the default `*.cloudfront.net` certificate — no ACM,
+  no Route 53 hosted zone, since a custom domain isn't needed yet.
+- Deploy is manual for now (`npm run build` in `ui/`, then `aws s3 sync ui/dist/ s3://<bucket>`)
+  -- wiring this into the CI job below is the remaining piece of this phase.
 
 ### Backend (SAM)
 

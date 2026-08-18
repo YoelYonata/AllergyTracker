@@ -8,17 +8,34 @@ A Budget named **"My Zero-Spend Budget"** ($1.00/month, alerts at $0.01 actual s
 `yoel.yonata@gmail.com` the moment this project spends anything. That's your early warning. This
 doc is the next step after that: how to actually stop it.
 
-## What one command deletes
+## What's in each stack
 
-Everything this project creates lives in a **single CloudFormation stack** (`allergy-tracker`),
-so deleting it removes all of the following in one shot:
+This project now spans **two CloudFormation stacks**, deployed and torn down independently:
 
-- Both `AllergyTrackerTable` (DynamoDB) — **this permanently deletes all stored readings and
+### `allergy-tracker` (backend)
+
+- `AllergyTrackerTable` (DynamoDB) — **deleting this permanently deletes all stored readings and
   subscribers**, see the backup step below
 - All four Lambdas (`ingest`, `notify`, `confirm`, `api`) and their IAM roles
 - All CloudWatch Log Groups and the `IngestFunctionErrorAlarm`
 - The EventBridge schedule, the DynamoDB Stream event source mapping, the Lambda Function URL
-- The API Gateway HTTP API and its routes (once Phase 4 is deployed)
+- The API Gateway HTTP API and its routes
+
+### `allergy-tracker-ui` (static hosting)
+
+- The S3 bucket holding the built dashboard (`ui/dist/`)
+- The CloudFront distribution serving it at `https://d3myi08baazbck.cloudfront.net`
+- The Origin Access Control + bucket policy connecting the two
+
+Delete the UI stack independently if you just want to take the live site down without touching
+pollen data or subscribers:
+
+```powershell
+sam delete --stack-name allergy-tracker-ui --region ca-central-1 --profile allergy-tracker
+```
+
+CloudFront distributions take several minutes to delete (same as they do to create) — that's
+normal, not a hang.
 
 ## Step 1 — optional: back up subscriber data first
 
@@ -29,7 +46,7 @@ aws dynamodb scan --table-name allergy-tracker --profile allergy-tracker --regio
   --output json > allergy-tracker-backup-$(Get-Date -Format yyyy-MM-dd).json
 ```
 
-## Step 2 — delete the stack
+## Step 2 — delete the backend stack
 
 ```powershell
 sam delete --stack-name allergy-tracker --region ca-central-1 --profile allergy-tracker
@@ -43,6 +60,7 @@ Or non-interactively (no prompts — use once you're sure):
 
 ```powershell
 sam delete --stack-name allergy-tracker --region ca-central-1 --profile allergy-tracker --no-prompts
+sam delete --stack-name allergy-tracker-ui --region ca-central-1 --profile allergy-tracker --no-prompts
 ```
 
 ## Step 3 — clean up what's outside the stack

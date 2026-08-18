@@ -3,6 +3,9 @@
 A small end-to-end system that pulls daily pollen forecasts, stores the history, shows it on a
 web dashboard, and emails subscribers when pollen counts spike.
 
+**Live:** https://d3myi08baazbck.cloudfront.net (default CloudFront domain — no custom domain
+yet, see Phase 6 of the plan)
+
 ## How it works
 1. A scheduled job (`ingest`) fetches pollen data for one or more locations from the **Google
    Pollen API** and writes each reading to the database — no threshold logic here, so a slow
@@ -47,7 +50,8 @@ flowchart TD
 ## Repository layout
 
 ```
-infra/template.yaml   # AWS SAM stack: table, 4 Lambdas, schedule, stream trigger, HTTP API, Function URL, alarm
+infra/template.yaml           # AWS SAM stack: table, 4 Lambdas, schedule, stream trigger, HTTP API, Function URL, alarm
+infra/hosting-template.yaml   # Static hosting stack: S3 + CloudFront for the dashboard
 services/
   src/
     common/           # Shared by all four Lambdas
@@ -152,7 +156,13 @@ cp .env.example .env.local   # fill in VITE_API_BASE_URL from the ApiEndpoint ou
 npm run dev
 ```
 
-Not hosted anywhere yet — see Phase 5/6 of the plan.
+Hosted at https://d3myi08baazbck.cloudfront.net (S3 + CloudFront, `infra/hosting-template.yaml`).
+To redeploy after a change:
+
+```bash
+npm run build
+aws s3 sync dist/ s3://<BucketName from the hosting stack output> --delete
+```
 
 ## Status
 
@@ -163,6 +173,6 @@ Not hosted anywhere yet — see Phase 5/6 of the plan.
 | 2 — Ingestion Lambda | Done — deployed to `ca-central-1`, invoked live, and the 3 written DynamoDB items were independently queried and confirmed to match the data model (including `GRASS` correctly stored as `upi: null`, not `0`) |
 | 3 — Email notifier (SES) | Done — decoupled `notify` Lambda off the DynamoDB Stream, double opt-in via a `confirm` Function URL, verified end to end with real SES sends (delivery attempts confirmed via `get-send-statistics`) |
 | 4 — Read API | Done — HTTP API + `api` Lambda (`/locations`, `/latest`, `/history`, `/subscribe`), per-route throttling, CORS; deployed to the live stack via a reviewed changeset and verified against it (all four routes hit for real, including a `POST /subscribe` against an already-confirmed address to check the overwrite guard) |
-| 5 — React dashboard | Built, not hosted — location picker, today's-pollen cards with per-allergen icons, Recharts trend line, subscribe form; verified in a headless browser (light + dark, no console errors) against the live API. Runs locally via `npm run dev`; no public URL yet |
-| 6 — Deployment & CI | Partial — SAM template exists (cost-conscious: on-demand billing, arm64, explicit log retention) and is deployed; no CI yet; dashboard hosting not set up |
+| 5 — React dashboard | Done — location picker, today's-pollen cards with per-allergen icons and a brand identity, Recharts trend line, subscribe form; verified in a headless browser (light + dark, no console errors) against the live API |
+| 6 — Deployment & CI | Partial — backend SAM template deployed (cost-conscious: on-demand billing, arm64, explicit log retention); dashboard now hosted live on S3 + CloudFront (`infra/hosting-template.yaml`, its own stack); no CI yet, so both still deploy manually |
 | 7 — Observability | Partial — error alarm + log retention in the template; SNS alerting and custom metrics not yet added |

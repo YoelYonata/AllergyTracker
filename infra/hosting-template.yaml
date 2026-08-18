@@ -1,0 +1,94 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Allergy Tracker - static dashboard hosting (S3 + CloudFront)
+
+# Separate stack from infra/template.yaml on purpose: this is plain static hosting, not
+# serverless compute, and keeping it separate means it can be torn down independently of the
+# backend (see docs/TEARDOWN.md) without touching pollen data or subscribers.
+#
+# Deploy with:
+#   sam build -t infra/hosting-template.yaml
+#   sam deploy --guided -t infra/hosting-template.yaml
+#
+# Then build the UI and sync it to the bucket this creates -- see ui/README.md.
+#
+# Cost posture: S3 storage for a ~1MB static build is fractions of a cent. CloudFront's
+# 1TB-transfer/10M-request free tier is permanent (not a 12-month trial), and PriceClass_100
+# below further caps it to the cheapest edge locations. No Route 53 hosted zone (~$0.50/mo) --
+# this uses the default *.cloudfront.net domain since a custom domain isn't needed yet.
+
+Resources:
+  UiBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      # No public website hosting, no public ACLs -- CloudFront reaches the bucket privately via
+      # Origin Access Control below, so the bucket itself is never directly reachable.
+
+  UiOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${AWS::StackName}-oac"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  UiDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        HttpVersion: http2
+        IPV6Enabled: true
+        PriceClass: PriceClass_100 # Cheapest edge tier -- North America + Europe is plenty for a personal project.
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true # *.cloudfront.net domain; swap for ACM + a custom domain later.
+        Origins:
+          - Id: UiBucketOrigin
+            DomainName: !GetAtt UiBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt UiOriginAccessControl.Id
+            S3OriginConfig:
+              OriginAccessIdentity: "" # Empty -- access is via OAC above, not the legacy OAI mechanism.
+        DefaultCacheBehavior:
+          TargetOriginId: UiBucketOrigin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6 # AWS managed "CachingOptimized"
+
+  UiBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref UiBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${UiBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${UiDistribution}"
+
+Outputs:
+  BucketName:
+    Description: S3 bucket to sync `ui/dist/` into
+    Value: !Ref UiBucket
+  DistributionId:
+    Description: CloudFront distribution ID (for cache invalidation)
+    Value: !Ref UiDistribution
+  DistributionDomainName:
+    Description: Live URL of the dashboard
+    Value: !Sub "https://${UiDistribution.DomainName}"

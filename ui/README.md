@@ -30,6 +30,16 @@ Build:
 npm run build     # outputs to dist/, ready to sync to S3
 ```
 
-Hosting (Phase 6): S3 + CloudFront, per the cost posture note in
-`docs/IMPLEMENTATION_PLAN.MD`. Not deployed yet -- `npm run build` + manual S3 sync until the
-CI job exists.
+Hosting: **live at https://d3myi08baazbck.cloudfront.net** -- S3 + CloudFront, stack defined in
+`infra/hosting-template.yaml` (separate from the backend stack, see `docs/TEARDOWN.md`). To
+redeploy after a change, no CI job yet so this is manual:
+
+```
+npm run build
+aws s3 sync dist/ s3://<BucketName from the hosting stack output> --delete --profile allergy-tracker
+```
+
+CloudFront caches aggressively; if a change doesn't show up, invalidate:
+```
+aws cloudfront create-invalidation --distribution-id <DistributionId> --paths "/*" --profile allergy-tracker
+```
