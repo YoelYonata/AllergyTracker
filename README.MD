@@ -42,7 +42,7 @@ flowchart TD
 | Web dashboard         | React                            | Today's view, trend chart, subscribe form |
 | Email notifier        | AWS SES + Lambda                 | Triggered by DynamoDB Streams, decoupled from ingestion |
 | Double opt-in confirm | Lambda Function URL              | Free, single public route — not folded into the read API |
-| Infra as code         | AWS SAM or CDK                  | TBD in Phase 0 |
+| Infra as code         | AWS SAM                          | Decided in Phase 0 — simplest fit for a Lambda-centric app |
 
 ## Repository layout
 
@@ -72,6 +72,7 @@ docs/                 # Design notes
 | [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) | Phased build-out plan |
 | [`docs/DATA_MODEL.md`](docs/DATA_MODEL.md) | DynamoDB single-table schema and access patterns |
 | [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) | Where the API key goes, env vars, AWS credentials |
+| [`docs/TEARDOWN.md`](docs/TEARDOWN.md) | How to fully delete the AWS stack (cost safety net) |
 
 ## Getting started
 
@@ -141,13 +142,17 @@ curl -X POST "$API/subscribe" -H 'Content-Type: application/json' \
 
 ### 6. Web dashboard (React)
 
-Not built yet — see Phase 5 of the plan.
+Location picker, today's-pollen cards (with per-allergen icons), a trend chart, and a subscribe
+form — talks only to the read API above, never to DynamoDB directly.
 
 ```bash
 cd ui
 npm install
+cp .env.example .env.local   # fill in VITE_API_BASE_URL from the ApiEndpoint output above
 npm run dev
 ```
+
+Not hosted anywhere yet — see Phase 5/6 of the plan.
 
 ## Status
 
@@ -157,7 +162,7 @@ npm run dev
 | 1 — Data model | Done — [`docs/DATA_MODEL.md`](docs/DATA_MODEL.md), verified against a real API response |
 | 2 — Ingestion Lambda | Done — deployed to `ca-central-1`, invoked live, and the 3 written DynamoDB items were independently queried and confirmed to match the data model (including `GRASS` correctly stored as `upi: null`, not `0`) |
 | 3 — Email notifier (SES) | Done — decoupled `notify` Lambda off the DynamoDB Stream, double opt-in via a `confirm` Function URL, verified end to end with real SES sends (delivery attempts confirmed via `get-send-statistics`) |
-| 4 — Read API | Built, not yet deployed — HTTP API + `api` Lambda (`/locations`, `/latest`, `/history`, `/subscribe`), per-route throttling, CORS; unit tested and `sam validate --lint` clean, but not yet verified against a live stack |
-| 5 — React dashboard | Not started |
-| 6 — Deployment & CI | Partial — SAM template exists (cost-conscious: on-demand billing, arm64, explicit log retention), no CI yet |
+| 4 — Read API | Done — HTTP API + `api` Lambda (`/locations`, `/latest`, `/history`, `/subscribe`), per-route throttling, CORS; deployed to the live stack via a reviewed changeset and verified against it (all four routes hit for real, including a `POST /subscribe` against an already-confirmed address to check the overwrite guard) |
+| 5 — React dashboard | Built, not hosted — location picker, today's-pollen cards with per-allergen icons, Recharts trend line, subscribe form; verified in a headless browser (light + dark, no console errors) against the live API. Runs locally via `npm run dev`; no public URL yet |
+| 6 — Deployment & CI | Partial — SAM template exists (cost-conscious: on-demand billing, arm64, explicit log retention) and is deployed; no CI yet; dashboard hosting not set up |
 | 7 — Observability | Partial — error alarm + log retention in the template; SNS alerting and custom metrics not yet added |

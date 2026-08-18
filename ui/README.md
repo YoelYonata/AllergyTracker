@@ -10,7 +10,13 @@ Layout:
 - `src/types.ts` -- response shapes, mirrors what `api.handler.py` actually returns
 - `src/theme.ts` -- the three pollen-type colors (validated categorical palette) and
   light/dark chrome tokens
+- `src/icons.tsx` -- hand-drawn SVG icons per allergen (tree/grass/weed) plus the brand logo mark,
+  colored via `theme.ts` so icon color always matches the chart's series color for that type
 - `src/components/` -- `LocationPicker`, `TodaySummary`, `TrendChart` (Recharts), `SubscribeForm`
+
+Brand: a gold/amber accent (`--brand` in `index.css`) is its own slot in the same validated color
+system the chart uses, chosen so it never collides with the three series colors. Swap it in one
+place (the `--brand`/`--brand-ink` custom properties) if you want a different accent later.
 
 Local dev:
 ```

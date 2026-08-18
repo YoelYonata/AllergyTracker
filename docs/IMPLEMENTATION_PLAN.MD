@@ -178,6 +178,9 @@ that routes internally. Four routes rather than the three originally planned:
   202/error message.
 - Verified with a headless-browser smoke test (Playwright) against the **live deployed API**,
   light and dark mode, zero console errors -- not just a local mock.
+- Visual/brand pass: hand-drawn per-allergen icons (`src/icons.tsx`) sized for legibility, a
+  small brand identity (logo mark, gold accent color, card elevation) so the dashboard reads as
+  more than the default Vite starter. Re-verified with the same headless-browser check after.
 - **Remaining:** S3 + CloudFront hosting (Phase 6), and narrowing `CorsAllowOrigin` from `*` to
   that fixed origin once it exists.
 
