@@ -6,6 +6,6 @@ version = 0.1
 [default.deploy.parameters]
 stack_name = "allergy-tracker-ui"
 region = "ca-central-1"
-resolve_s3 = true
+s3_bucket = "aws-sam-cli-managed-default-samclisourcebucket-ryskqxxopokf"
 confirm_changeset = false
 no_fail_on_empty_changeset = true
