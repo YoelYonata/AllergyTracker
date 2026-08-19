@@ -20,6 +20,20 @@ Parameters:
   RepositoryName:
     Type: String
     Default: AllergyTracker
+  GitHubOrgId:
+    Type: String
+    Default: "27874728"
+    Description: >
+      GitHub's immutable numeric ID for GitHubOrg. Since some point in 2025/2026, GitHub embeds
+      this (not just the account name) in the OIDC token's `sub` claim -- `repo:{org}@{orgId}/
+      {repo}@{repoId}:ref:...` -- specifically so a renamed/transferred account or repo can't
+      silently inherit an old trust relationship pinned only by name. Find it via `gh api
+      users/<org>` (or `orgs/<org>`) -> `.id`, or from a CloudTrail AssumeRoleWithWebIdentity
+      event's userIdentity.userName if a deploy has already failed once.
+  RepositoryId:
+    Type: String
+    Default: "1323418695"
+    Description: GitHub's immutable numeric ID for RepositoryName. Same reasoning as GitHubOrgId -- `gh api repos/<org>/<repo>` -> `.id`.
   OIDCProviderArn:
     Type: String
     Default: ""
@@ -71,12 +85,14 @@ Resources:
               Federated: !If [CreateOIDCProvider, !Ref GitHubOIDCProvider, !Ref OIDCProviderArn]
             Action: sts:AssumeRoleWithWebIdentity
             Condition:
+              # Scoped to main only -- PRs from branches/forks never get a token this role trusts,
+              # so a malicious PR workflow can't exfiltrate deploy credentials. sub is an exact
+              # match (not StringLike/wildcard) since GitHub's numeric IDs pin this to this
+              # specific org/repo, not just whatever currently holds that name -- see
+              # GitHubOrgId/RepositoryId above.
               StringEquals:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
-              # Scoped to main only -- PRs from branches/forks never get a token this role trusts,
-              # so a malicious PR workflow can't exfiltrate deploy credentials.
-              StringLike:
-                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubOrg}/${RepositoryName}:ref:refs/heads/main
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubOrg}@${GitHubOrgId}/${RepositoryName}@${RepositoryId}:ref:refs/heads/main
       Policies:
         # CloudFormation drives both stacks; scoped to their stack ARNs (any stack name prefix
         # match, since CFN adds a random suffix) rather than cloudformation:* on the account.
