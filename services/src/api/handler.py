@@ -265,7 +265,9 @@ def _post_subscribe(store: Store, event: dict) -> dict:
     if subscriber is None:
         # Already CONFIRMED. Nothing to do, and the response must look identical to a real
         # signup so this endpoint can't be used to probe which addresses are subscribed.
-        logger.info("Subscribe no-op: %s already confirmed for %s", data["email"], data["location_id"])
+        logger.info(
+            "Subscribe no-op: %s already confirmed for %s", data["email"], data["location_id"]
+        )
         return _json_response(202, {"message": SUBSCRIBE_ACCEPTED_MESSAGE})
 
     try:

@@ -1,0 +1,9 @@
+[tool.ruff]
+# py310, not the py312 Lambda runtime: keeps lint suggestions (e.g. datetime.UTC, 3.11+) from
+# drifting ahead of whatever Python contributors actually have installed for local dev/CI.
+target-version = "py310"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

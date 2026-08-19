@@ -1,0 +1,125 @@
+name: CI/CD
+
+# PRs and pushes to any branch run the test/lint/build jobs -- no AWS credentials involved, so
+# this is safe to run even on PRs from forks. Only a push to main additionally deploys, and only
+# after those same jobs pass. See docs/IMPLEMENTATION_PLAN.md (Phase 6).
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: ca-central-1
+
+jobs:
+  test-python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            services/requirements.txt
+            services/requirements-dev.txt
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+        working-directory: services
+      - run: ruff check src tests
+        working-directory: services
+      - run: python -m pytest tests/ -q
+        working-directory: services
+
+  validate-sam:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/setup-sam@v2
+      - run: |
+          sam validate --lint -t infra/template.yaml
+          sam validate --lint -t infra/hosting-template.yaml
+          sam validate --lint -t infra/github-oidc-template.yaml
+
+  build-ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci
+        working-directory: ui
+      - run: npm run lint
+        working-directory: ui
+      - run: npm run build
+        working-directory: ui
+        env:
+          # Build-only check -- lint/typecheck/bundle, no real API calls happen at build time.
+          # The deploy-frontend job below rebuilds with the real endpoint before publishing.
+          VITE_API_BASE_URL: https://ci-placeholder.execute-api.ca-central-1.amazonaws.com
+
+  deploy-backend:
+    needs: [test-python, validate-sam]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # required for OIDC -- see infra/github-oidc-template.yaml
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: aws-actions/setup-sam@v2
+      - run: sam build -t infra/template.yaml
+      - run: sam deploy --config-file infra/samconfig-backend.toml
+
+  deploy-frontend:
+    needs: [build-ui, deploy-backend]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Resolve read API endpoint from the deployed backend stack
+        run: |
+          API_URL=$(aws cloudformation describe-stacks --stack-name allergy-tracker \
+            --query "Stacks[0].Outputs[?OutputKey=='ApiEndpoint'].OutputValue" --output text)
+          echo "VITE_API_BASE_URL=$API_URL" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci
+        working-directory: ui
+      - run: npm run build
+        working-directory: ui
+      - name: Sync dist/ to the dashboard's S3 bucket
+        run: |
+          BUCKET=$(aws cloudformation describe-stacks --stack-name allergy-tracker-ui \
+            --query "Stacks[0].Outputs[?OutputKey=='BucketName'].OutputValue" --output text)
+          aws s3 sync ui/dist/ "s3://$BUCKET" --delete
+      - name: Invalidate CloudFront
+        run: |
+          DIST_ID=$(aws cloudformation describe-stacks --stack-name allergy-tracker-ui \
+            --query "Stacks[0].Outputs[?OutputKey=='DistributionId'].OutputValue" --output text)
+          # Content-hashed JS/CSS filenames (Vite default) never change content under the same
+          # name, so only index.html -- the one file whose content changes without a new
+          # filename -- needs invalidating.
+          aws cloudfront create-invalidation --distribution-id "$DIST_ID" --paths "/index.html"

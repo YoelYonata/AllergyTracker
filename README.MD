@@ -50,8 +50,11 @@ flowchart TD
 ## Repository layout
 
 ```
+.github/workflows/ci.yml      # Test/lint/build on every PR+push; deploy both stacks on push to main
 infra/template.yaml           # AWS SAM stack: table, 4 Lambdas, schedule, stream trigger, HTTP API, Function URL, alarm
 infra/hosting-template.yaml   # Static hosting stack: S3 + CloudFront for the dashboard
+infra/github-oidc-template.yaml   # One-time: IAM role CI assumes via GitHub OIDC (no long-lived AWS keys)
+infra/samconfig-*.toml        # Non-interactive `sam deploy` config, shared by CI and local deploys
 services/
   src/
     common/           # Shared by all four Lambdas
@@ -174,5 +177,5 @@ aws s3 sync dist/ s3://<BucketName from the hosting stack output> --delete
 | 3 — Email notifier (SES) | Done — decoupled `notify` Lambda off the DynamoDB Stream, double opt-in via a `confirm` Function URL, verified end to end with real SES sends (delivery attempts confirmed via `get-send-statistics`) |
 | 4 — Read API | Done — HTTP API + `api` Lambda (`/locations`, `/latest`, `/history`, `/subscribe`), per-route throttling, CORS; deployed to the live stack via a reviewed changeset and verified against it (all four routes hit for real, including a `POST /subscribe` against an already-confirmed address to check the overwrite guard) |
 | 5 — React dashboard | Done — location picker, today's-pollen cards with per-allergen icons and a brand identity, Recharts trend line, subscribe form; verified in a headless browser (light + dark, no console errors) against the live API |
-| 6 — Deployment & CI | Partial — backend SAM template deployed (cost-conscious: on-demand billing, arm64, explicit log retention); dashboard now hosted live on S3 + CloudFront (`infra/hosting-template.yaml`, its own stack); no CI yet, so both still deploy manually |
+| 6 — Deployment & CI | CI/CD written (`.github/workflows/ci.yml`: tests/lint/build on every PR and push, deploy on push to `main` via GitHub OIDC, no long-lived AWS keys) but not yet live — needs a one-time manual deploy of `infra/github-oidc-template.yaml` and a GitHub secret, see [`CONFIGURATION.md`](docs/CONFIGURATION.md#cicd-one-time-setup-phase-6). Until then both stacks still deploy manually as described below |
 | 7 — Observability | Partial — error alarm + log retention in the template; SNS alerting and custom metrics not yet added |

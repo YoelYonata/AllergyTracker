@@ -1,0 +1,195 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Allergy Tracker - GitHub Actions OIDC federation. Lets the CI workflow deploy on push to
+  main without any long-lived AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY sitting in GitHub
+  Secrets: GitHub issues a short-lived token per workflow run, and this role's trust policy
+  only accepts one bound to this exact repo + branch. One-time, manual deploy -- this is
+  account-level IAM, deliberately not something CI deploys for itself.
+#
+# Deploy once, by hand:
+#   sam deploy --guided -t infra/github-oidc-template.yaml
+# (or plain `aws cloudformation deploy` -- there's no SAM transform here, just IAM)
+#
+# Then take the RoleArn output and add it as the GitHub repo secret AWS_DEPLOY_ROLE_ARN
+# (Settings -> Secrets and variables -> Actions) -- .github/workflows/ci.yml reads it from there.
+
+Parameters:
+  GitHubOrg:
+    Type: String
+    Default: YoelYonata
+  RepositoryName:
+    Type: String
+    Default: AllergyTracker
+  OIDCProviderArn:
+    Type: String
+    Default: ""
+    Description: >
+      Leave blank the first time this template is deployed in this AWS account -- it creates
+      the account's GitHub OIDC provider. Only one such provider is allowed per account, so if
+      one already exists (e.g. from another project), pass its ARN here instead and this
+      template reuses it rather than failing on a duplicate.
+  SamArtifactsBucketName:
+    Type: String
+    Default: aws-sam-cli-managed-default-samclisourcebucket-ryskqxxopokf
+    Description: >
+      The SAM CLI-managed bucket `sam deploy --resolve-s3` already created for this account/
+      region (see `aws s3 ls`). CI uploads build artifacts here, so the role needs scoped
+      access to exactly this bucket, not s3:* on everything.
+  UiBucketName:
+    Type: String
+    Default: allergy-tracker-ui-uibucket-vempsmpf2vtz
+    Description: The dashboard's S3 bucket (allergy-tracker-ui stack's BucketName output).
+
+Conditions:
+  CreateOIDCProvider: !Equals [!Ref OIDCProviderArn, ""]
+
+Resources:
+  GitHubOIDCProvider:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateOIDCProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      # Root CA (ISRG Root X1) thumbprint for token.actions.githubusercontent.com's current TLS
+      # chain, captured directly via `openssl s_client -connect
+      # token.actions.githubusercontent.com:443 -showcerts` on 2026-08-18. Using the root rather
+      # than the issuing intermediate (Let's Encrypt rotates those more often) so this doesn't
+      # need updating just because GitHub's intermediate CA changes; only a root rotation would.
+      ThumbprintList:
+        - ab9d0263244dd0326eb67015705a667e79cfe998
+
+  GitHubActionsDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: allergy-tracker-github-actions-deploy
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If [CreateOIDCProvider, !Ref GitHubOIDCProvider, !Ref OIDCProviderArn]
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              # Scoped to main only -- PRs from branches/forks never get a token this role trusts,
+              # so a malicious PR workflow can't exfiltrate deploy credentials.
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubOrg}/${RepositoryName}:ref:refs/heads/main
+      Policies:
+        # CloudFormation drives both stacks; scoped to their stack ARNs (any stack name prefix
+        # match, since CFN adds a random suffix) rather than cloudformation:* on the account.
+        - PolicyName: cloudformation-stacks
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: cloudformation:*
+                Resource:
+                  - !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/allergy-tracker/*
+                  - !Sub arn:${AWS::Partition}:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/allergy-tracker-ui/*
+
+        # SAM's deployment-artifacts bucket -- upload only, not account-wide S3 access.
+        - PolicyName: sam-artifacts-bucket
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:GetBucketLocation, s3:ListBucket]
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::${SamArtifactsBucketName}
+                  - !Sub arn:${AWS::Partition}:s3:::${SamArtifactsBucketName}/*
+
+        # The dashboard's own bucket -- CI syncs ui/dist/ here directly (not through CFN).
+        - PolicyName: ui-bucket-sync
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [s3:PutObject, s3:DeleteObject, s3:GetBucketLocation, s3:ListBucket]
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::${UiBucketName}
+                  - !Sub arn:${AWS::Partition}:s3:::${UiBucketName}/*
+              - Effect: Allow
+                Action: cloudfront:CreateInvalidation
+                Resource: "*" # CreateInvalidation has no resource-level ARN support to scope further.
+
+        # Everything CloudFormation actually provisions inside the backend stack: the four
+        # Lambdas + their log groups, the table, the HTTP API, the schedule, the alarm. Scoped
+        # by the "allergy-tracker" name prefix used throughout infra/template.yaml, not by
+        # blanket service access.
+        - PolicyName: backend-resources
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:*
+                Resource: !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:allergy-tracker-*
+              - Effect: Allow
+                Action: dynamodb:*
+                Resource:
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/allergy-tracker
+                  - !Sub arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/allergy-tracker/*
+              - Effect: Allow
+                Action: logs:*
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/allergy-tracker-*
+              - Effect: Allow
+                Action: [scheduler:*]
+                Resource: !Sub arn:${AWS::Partition}:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/*/allergy-tracker-*
+              - Effect: Allow
+                Action: [apigateway:*]
+                Resource: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis*
+              - Effect: Allow
+                Action: [cloudwatch:PutMetricAlarm, cloudwatch:DeleteAlarms, cloudwatch:DescribeAlarms]
+                Resource: !Sub arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:allergy-tracker-*
+              # CloudFormation creates/attaches the Lambda execution roles on this stack's
+              # behalf -- iam:PassRole is what lets it hand those roles to Lambda, scoped to
+              # the role-name prefix SAM generates, not */"*".
+              - Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:PassRole
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:CreatePolicy
+                  - iam:DeletePolicy
+                  - iam:GetPolicy
+                  - iam:ListPolicyVersions
+                  - iam:CreatePolicyVersion
+                  - iam:DeletePolicyVersion
+                Resource:
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/allergy-tracker-*
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/allergy-tracker-*
+
+        # The hosting stack's own resources: S3 bucket, CloudFront distribution/OAC, bucket
+        # policy. CloudFront/S3-bucket-creation don't support resource-level scoping as tightly
+        # as the backend's named Lambdas/tables, so this is service-level within the stack's
+        # blast radius (still bounded by the cloudformation-stacks policy above, since only the
+        # allergy-tracker-ui changeset can invoke it).
+        - PolicyName: hosting-resources
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [s3:CreateBucket, s3:DeleteBucket, s3:PutBucketPolicy, s3:DeleteBucketPolicy, s3:PutEncryptionConfiguration, s3:PutBucketPublicAccessBlock, s3:GetBucketPolicy, s3:GetEncryptionConfiguration, s3:GetBucketPublicAccessBlock]
+                Resource: !Sub arn:${AWS::Partition}:s3:::allergy-tracker-ui-*
+              - Effect: Allow
+                Action: cloudfront:*
+                Resource: "*" # CloudFront distribution/OAC IDs aren't known before creation.
+
+      Tags:
+        - Key: project
+          Value: allergy-tracker
+
+Outputs:
+  RoleArn:
+    Description: Add this as the AWS_DEPLOY_ROLE_ARN secret in the GitHub repo (Settings > Secrets and variables > Actions)
+    Value: !GetAtt GitHubActionsDeployRole.Arn

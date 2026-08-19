@@ -1,0 +1,11 @@
+# Non-interactive `sam deploy` config for infra/hosting-template.yaml. Deploying this stack
+# only provisions/updates the S3 bucket + CloudFront distribution -- it doesn't push the built
+# dashboard itself, see the frontend job in .github/workflows/ci.yml for that.
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "allergy-tracker-ui"
+region = "ca-central-1"
+resolve_s3 = true
+confirm_changeset = false
+no_fail_on_empty_changeset = true

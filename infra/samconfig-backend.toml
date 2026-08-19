@@ -1,0 +1,13 @@
+# Non-interactive `sam deploy` config for infra/template.yaml, used by both CI and local runs
+# (`sam deploy --config-file infra/samconfig-backend.toml`). Nothing here is secret -- the
+# sender address and CloudFront domain are already public in README.md/TEARDOWN.md.
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "allergy-tracker"
+region = "ca-central-1"
+resolve_s3 = true
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = false
+no_fail_on_empty_changeset = true
+parameter_overrides = "SesSenderEmail=\"yoel.yonata@gmail.com\" CorsAllowOrigin=\"https://d3myi08baazbck.cloudfront.net\""

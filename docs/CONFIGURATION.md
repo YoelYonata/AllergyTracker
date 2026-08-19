@@ -153,3 +153,42 @@ export AWS_PROFILE=allergy-tracker
 
 SSO credentials expire on their own, so a leaked `~/.aws` directory is a bounded problem rather
 than a permanent one.
+
+## CI/CD one-time setup (Phase 6)
+
+`.github/workflows/ci.yml` runs tests/lint on every PR and push, and deploys both stacks on
+every push to `main`. Two things need doing by hand, once, before the deploy jobs will work —
+neither is something CI should do to itself:
+
+1. **Deploy the GitHub OIDC role** (`infra/github-oidc-template.yaml`) — creates the IAM role
+   CI assumes, trusted only for `repo:<org>/<repo>:ref:refs/heads/main`, so a PR from a fork can
+   never obtain deploy credentials:
+   ```bash
+   sam deploy --guided -t infra/github-oidc-template.yaml
+   ```
+   Take the `RoleArn` output and add it as the **`AWS_DEPLOY_ROLE_ARN`** repo secret (GitHub →
+   Settings → Secrets and variables → Actions). If this AWS account already has a GitHub OIDC
+   provider from another project, pass its ARN via `--parameter-overrides
+   OIDCProviderArn=<existing arn>` instead of letting this template create a second one — IAM
+   only allows one per account.
+
+2. **Add a lifecycle rule to the SAM-managed artifacts bucket.** `sam deploy --resolve-s3`
+   (used by both `infra/samconfig-backend.toml` and `infra/samconfig-hosting.toml`) uploads a
+   new build zip to this bucket on every deploy but never deletes old ones — left alone that
+   grows forever. One-time fix:
+   ```bash
+   BUCKET=$(aws s3 ls | grep aws-sam-cli-managed-default-samclisourcebucket | awk '{print $3}')
+   aws s3api put-bucket-lifecycle-configuration --bucket "$BUCKET" --lifecycle-configuration '{
+     "Rules": [{
+       "ID": "expire-old-build-artifacts",
+       "Status": "Enabled",
+       "Filter": {},
+       "Expiration": {"Days": 30},
+       "NoncurrentVersionExpiration": {"NoncurrentDays": 30}
+     }]
+   }'
+   ```
+
+Once both are done, a push to `main` builds/tests, deploys the backend stack, then rebuilds the
+dashboard against the live `ApiEndpoint` and syncs it to the hosting bucket — see the `deploy-*`
+jobs in `.github/workflows/ci.yml`.

@@ -21,7 +21,6 @@ from api.handler import (
     _validate_subscribe,
 )
 
-
 # --- Response encoding ------------------------------------------------------------------
 
 
@@ -161,7 +160,9 @@ def test_accepts_location_id_as_an_alias_for_location():
     assert data["location_id"] == "vancouver"
 
 
-@pytest.mark.parametrize("email", ["", "not-an-email", "no@tld", "two @spaces.com", "a@" + "b" * 300 + ".com"])
+@pytest.mark.parametrize(
+    "email", ["", "not-an-email", "no@tld", "two @spaces.com", "a@" + "b" * 300 + ".com"]
+)
 def test_rejects_bad_email_addresses(email):
     data, error = _validate_subscribe({"email": email, "location": "vancouver"})
 

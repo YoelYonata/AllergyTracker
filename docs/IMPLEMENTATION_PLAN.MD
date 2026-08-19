@@ -186,10 +186,25 @@ that routes internally. Four routes rather than the three originally planned:
   from `*` to that exact CloudFront domain once it existed, per the plan below; verified the
   live site still loads with no console errors after the change.
 
-## Phase 6 — Deployment & CI
+## Phase 6 — Deployment & CI — CI/CD wired, awaiting one-time AWS setup
 
 Goal: push a commit to `main` and have both the backend and dashboard deploy themselves, with
 tests gating the merge — no long-lived AWS credentials stored anywhere.
+
+**`.github/workflows/ci.yml` is written and its non-AWS jobs verified locally** (`ruff check`,
+`pytest`, `sam validate --lint` on all three templates, `npm run lint`/`npm run build` all pass —
+see the commands each job runs). What's not yet done, and needs the repo owner to do it by hand
+once (CI shouldn't grant itself deploy access) — steps are in
+[`CONFIGURATION.md`](CONFIGURATION.md#cicd-one-time-setup-phase-6):
+
+1. Deploy `infra/github-oidc-template.yaml` and add its `RoleArn` output as the
+   `AWS_DEPLOY_ROLE_ARN` GitHub repo secret.
+2. Add the lifecycle rule to the SAM-managed artifacts bucket (the "nice-to-have" below, now
+   with the actual command).
+
+Until those are done, `deploy-backend`/`deploy-frontend` will fail on `AWS_DEPLOY_ROLE_ARN` not
+being set — the test/lint/build jobs run and gate merges regardless, so this is safe to merge
+before that setup happens.
 
 ### Dashboard hosting (done, ahead of the rest of this phase)
 
@@ -203,12 +218,14 @@ tests gating the merge — no long-lived AWS credentials stored anywhere.
   directly reachable.
 - `PriceClass_100` (cheapest edge tier) and the default `*.cloudfront.net` certificate — no ACM,
   no Route 53 hosted zone, since a custom domain isn't needed yet.
-- Deploy is manual for now (`npm run build` in `ui/`, then `aws s3 sync ui/dist/ s3://<bucket>`)
-  -- wiring this into the CI job below is the remaining piece of this phase.
+- Deploy was manual (`npm run build` in `ui/`, then `aws s3 sync ui/dist/ s3://<bucket>`) —
+  now wired into the `deploy-frontend` job below, once the one-time AWS setup is done.
 
 ### Backend (SAM)
 
-- `sam build && sam deploy` stays the manual/local fallback; CI runs the same two commands.
+- `sam build && sam deploy` remains the manual/local fallback (`infra/samconfig-backend.toml`
+  now makes the deploy half non-interactive: `sam deploy --config-file
+  infra/samconfig-backend.toml`); CI's `deploy-backend` job runs the same two commands.
 - **One environment (`prod`) to start.** A personal, low-traffic project doesn't need a
   permanently-running parallel `dev` stack duplicating DynamoDB/Lambda/CloudWatch costs. If you
   want a scratch stack while actively developing, `sam deploy --stack-name allergy-tracker-dev`
@@ -216,35 +233,53 @@ tests gating the merge — no long-lived AWS credentials stored anywhere.
   tears it down when you're done so it isn't left running (and billing, however slightly) in the
   background.
 - SAM's auto-created deployment-artifacts S3 bucket accumulates old build zips on every deploy.
-  Add a lifecycle rule (e.g. expire noncurrent versions after 30 days) so it doesn't grow
-  unbounded — small cost, but a good habit to build now.
+  A lifecycle rule fixes this, but it's account-level S3 config, not something in
+  `infra/template.yaml` to deploy — see the one-time command in
+  [`CONFIGURATION.md`](CONFIGURATION.md#cicd-one-time-setup-phase-6).
 
-### GitHub Actions
+### GitHub Actions — `.github/workflows/ci.yml`
 
-- **On every PR / push to a branch:** `pytest`, `sam validate --lint`, and a Python linter
-  (`ruff`). No AWS credentials needed for this job, so it's safe to run even on PRs from forks.
-- **On push to `main`:** `sam build && sam deploy --no-fail-on-empty-changeset`, authenticated via
-  **GitHub OIDC federation** (`aws-actions/configure-aws-credentials` with `role-to-assume`) —
-  *not* long-lived `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` secrets. GitHub issues a short-lived
-  token per run that the IAM role trusts only for this repo + the `main` branch; nothing durable
-  ever sits in GitHub Secrets. This is worth doing even on a hobby project — it's the current best
-  practice and there's no extra cost to it.
-- Scope the deploy role to exactly what SAM needs (CloudFormation, plus the specific
-  Lambda/DynamoDB/IAM/SSM/EventBridge actions the stack uses) — same least-privilege principle as
-  the Phase 0 IAM user, not `AdministratorAccess`.
-- **Frontend job:** `npm ci && npm run build` in `ui/`, sync `dist/` to the S3 bucket, then
-  invalidate CloudFront. If the build's JS/CSS filenames are content-hashed (Vite does this by
-  default), only `index.html` needs invalidating — keeps invalidations minimal (though the first
-  1,000 paths/month are free anyway). Scope the S3 sync's `--delete` to the dashboard's own
-  prefix/bucket only.
-- Both jobs should be safe to re-run on failure: `sam deploy` is naturally idempotent via
-  CloudFormation changesets, and an S3 sync is idempotent by nature.
+- **`test-python`, `validate-sam`, `build-ui`** run on every PR and every push to any branch.
+  No AWS credentials needed, so these are safe to run even on PRs from forks:
+  - `test-python`: `ruff check` + `pytest` (added `services/pyproject.toml` for ruff config and
+    `services/requirements-dev.txt` for `ruff`/`pip-audit`; running ruff surfaced and fixed a
+    handful of pre-existing style issues so CI starts green — see the diff).
+  - `validate-sam`: `sam validate --lint` against all three templates (`template.yaml`,
+    `hosting-template.yaml`, and the new `github-oidc-template.yaml` below).
+  - `build-ui`: `npm run lint && npm run build` against a placeholder `VITE_API_BASE_URL` — a
+    build-only check, no real API calls happen here.
+- **`deploy-backend`, `deploy-frontend`** run only on push to `main`, and only after the jobs
+  above pass. Authenticated via **GitHub OIDC federation**
+  (`aws-actions/configure-aws-credentials` with `role-to-assume`) — *not* long-lived
+  `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` secrets. GitHub issues a short-lived token per run
+  that the IAM role trusts only for `repo:<org>/<repo>:ref:refs/heads/main`; nothing durable ever
+  sits in GitHub Secrets except the role's ARN itself, which grants nothing on its own.
+  - `deploy-backend`: `sam build && sam deploy --config-file infra/samconfig-backend.toml`.
+  - `deploy-frontend`: rebuilds the dashboard against the just-deployed stack's real
+    `ApiEndpoint` (fetched via `aws cloudformation describe-stacks`, not hardcoded), syncs
+    `dist/` to the hosting bucket, then invalidates `/index.html` only — Vite's content-hashed
+    JS/CSS filenames mean nothing else needs invalidating.
+  - Both jobs are safe to re-run on failure: `sam deploy` is idempotent via CloudFormation
+    changesets, and `aws s3 sync` is idempotent by nature.
+- **The deploy role itself is `infra/github-oidc-template.yaml`**, a separate, plain
+  CloudFormation template (no SAM transform — it's pure IAM, nothing serverless) deployed by
+  hand, once, outside CI — see the one-time setup steps in
+  [`CONFIGURATION.md`](CONFIGURATION.md#cicd-one-time-setup-phase-6). Its policy is scoped to
+  the `allergy-tracker`/`allergy-tracker-ui` stacks and `allergy-tracker-*`-named resources
+  specifically (Lambda functions, the one DynamoDB table, log groups, the schedule, the alarm,
+  the two S3 buckets), not `AdministratorAccess` or blanket `cloudformation:*`/`s3:*` on the
+  account — same least-privilege principle as the Phase 0 IAM user and the Phase 4 API Lambda's
+  three-verb DynamoDB policy.
+- Verified locally, short of an actual AWS deploy (which needs the OIDC role to exist first —
+  see above): `ruff check`, `pytest`, `sam validate --lint` on all three templates, `npm run
+  lint`, and `npm run build` all pass as of this change.
 
 ### Nice-to-have once the basics work
 
-- `cfn-lint` (or `sam validate --lint`) and the test job as **required status checks** on `main`
-  via branch protection.
-- `pip-audit` / `npm audit` as a non-blocking scheduled (weekly) job rather than a per-PR gate.
+- `cfn-lint` (or `sam validate --lint`, already in `validate-sam`) and `test-python` as
+  **required status checks** on `main` via branch protection.
+- `pip-audit` / `npm audit` as a non-blocking scheduled (weekly) job rather than a per-PR gate —
+  `pip-audit` is already in `services/requirements-dev.txt`, just not wired into a workflow yet.
 
 ## Phase 7 — Observability & polish
 
