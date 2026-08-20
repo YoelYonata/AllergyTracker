@@ -27,7 +27,12 @@ chronologically — that's why the sort key is `READING#YYYY-MM-DD` and not, say
 - **Billing mode:** `PAY_PER_REQUEST` — no capacity planning, and effectively free at this
   project's volume (see the cost posture note in [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md)).
 - **TTL attribute:** `ttl` (epoch seconds), set on reading items only — old history expires
-  automatically instead of growing forever.
+  automatically instead of growing forever. Defaults to 90 days from write time
+  (`READING_TTL_DAYS`, see [`CONFIGURATION.md`](CONFIGURATION.md#environment-variables)), matching
+  the dashboard's 90-day max history range — see
+  [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md#history-range--retention) for why. Deletion is
+  DynamoDB's native TTL sweep, not a cleanup job — free, and typically completes within 48 hours
+  of expiry.
 - **Streams:** `NEW_AND_OLD_IMAGES`, enabled so Phase 3 can optionally drive the notifier off the
   stream instead of calling SES inline.
 
@@ -80,7 +85,7 @@ sk = "READING#2026-08-10"
 | `types` | M | see below | Keyed by pollen type code |
 | `max_upi` | N | `4` | Highest UPI across all types — denormalized so the anomaly check and dashboard don't have to walk the map |
 | `fetched_at` | S | `"2026-08-10T06:00:11Z"` | When this item was last written |
-| `ttl` | N | `1786000000` | Epoch seconds, ~1 year out |
+| `ttl` | N | `1786000000` | Epoch seconds, ~90 days out (`READING_TTL_DAYS`) |
 
 The `types` map, confirmed against a real `forecast:lookup` response:
 

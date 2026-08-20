@@ -4,7 +4,7 @@ import { getHistory, getLatest, getLocations } from "./api";
 import { LocationPicker } from "./components/LocationPicker";
 import { SubscribeForm } from "./components/SubscribeForm";
 import { TodaySummary } from "./components/TodaySummary";
-import { TrendChart } from "./components/TrendChart";
+import { TrendChart, type HistoryRangeDays } from "./components/TrendChart";
 import { LogoIcon } from "./icons";
 import type { Location, Reading } from "./types";
 
@@ -13,6 +13,7 @@ export default function App() {
   const [selected, setSelected] = useState<string>("");
   const [latest, setLatest] = useState<Reading | null>(null);
   const [history, setHistory] = useState<Reading[]>([]);
+  const [rangeDays, setRangeDays] = useState<HistoryRangeDays>(30);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -27,13 +28,17 @@ export default function App() {
   useEffect(() => {
     if (!selected) return;
     setError(null);
-    Promise.all([getLatest(selected), getHistory(selected, 14)])
-      .then(([latestRes, historyRes]) => {
-        setLatest(latestRes.reading);
-        setHistory(historyRes.readings);
-      })
+    getLatest(selected)
+      .then((res) => setLatest(res.reading))
       .catch((err) => setError(err instanceof Error ? err.message : "Failed to load pollen data."));
   }, [selected]);
+
+  useEffect(() => {
+    if (!selected) return;
+    getHistory(selected, rangeDays)
+      .then((res) => setHistory(res.readings))
+      .catch((err) => setError(err instanceof Error ? err.message : "Failed to load pollen data."));
+  }, [selected, rangeDays]);
 
   return (
     <div className="app">
@@ -55,7 +60,7 @@ export default function App() {
       {selected && (
         <>
           <TodaySummary reading={latest} />
-          <TrendChart readings={history} />
+          <TrendChart readings={history} rangeDays={rangeDays} onRangeChange={setRangeDays} />
           <SubscribeForm locationId={selected} />
         </>
       )}

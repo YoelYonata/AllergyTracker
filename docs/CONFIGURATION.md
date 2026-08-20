@@ -77,7 +77,7 @@ Defense in depth, worth doing even though the key is stored safely on the AWS si
 | `POLLEN_API_KEY_PARAM` | Lambda | One of these two | SSM parameter name holding the key |
 | `DDB_TABLE_NAME` | Both | Yes (defaults to `allergy-tracker`) | DynamoDB table name |
 | `FORECAST_DAYS` | Ingest only | No (default `3`) | Days to fetch per run, 1–5 |
-| `READING_TTL_DAYS` | Ingest only | No (default `365`) | How long readings live before TTL expiry |
+| `READING_TTL_DAYS` | Ingest only | No (default `90`) | How long readings live before TTL expiry — matches the dashboard's 90-day max history range, see [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md#history-range--retention) |
 | `DEFAULT_THRESHOLD` | Notify + api | No (default `3`) | Fallback UPI threshold if a subscriber has none set |
 | `SES_SENDER_EMAIL` | Notify + api | Yes | Verified SES identity used as the "From" address on alert and confirmation emails |
 | `CONFIRM_BASE_URL` | Api Lambda, and local `seed_subscriber.py` | Yes, to subscribe | The deployed `ConfirmFunction`'s Function URL. The template wires this into the api Lambda automatically; only set it by hand for local script runs — see the stack Outputs after `sam deploy` |
@@ -96,7 +96,7 @@ aws cloudformation describe-stacks --stack-name allergy-tracker \
 |-------|---------|
 | `GET /locations` | Locations the dashboard's picker offers |
 | `GET /pollen/{location}/latest` | Today's reading for one location |
-| `GET /pollen/{location}/history?days=N` | Trend data; `days` defaults to 14, max 30 |
+| `GET /pollen/{location}/history?days=N` | Trend data; `days` defaults to 30, max 90 (the dashboard's toggle offers 30 or 90) |
 | `POST /subscribe` | `{"email", "location", "threshold"?, "pollen_types"?}` — creates a `PENDING` subscriber and emails the confirm link |
 
 **Two template parameters affect it:**
@@ -154,14 +154,15 @@ export AWS_PROFILE=allergy-tracker
 SSO credentials expire on their own, so a leaked `~/.aws` directory is a bounded problem rather
 than a permanent one.
 
-## CI/CD one-time setup (Phase 6)
+## CI/CD one-time setup (Phase 6) — done, kept here for redoing in a new account
 
 `.github/workflows/ci.yml` runs tests/lint on every PR and push, and deploys both stacks on
-every push to `main`. Two things need doing by hand, once, before the deploy jobs will work —
-neither is something CI should do to itself:
+every push to `main`. Two things needed doing by hand, once, before the deploy jobs would work —
+neither is something CI should do to itself. Both are done for this account/repo; the steps below
+are what to redo if this project is ever forked or moved to a different AWS account.
 
 1. **Deploy the GitHub OIDC role** (`infra/github-oidc-template.yaml`) — creates the IAM role
-   CI assumes, trusted only for `repo:<org>/<repo>:ref:refs/heads/main`, so a PR from a fork can
+   CI assumes, trusted only for this exact repo on `refs/heads/main`, so a PR from a fork can
    never obtain deploy credentials:
    ```bash
    sam deploy --guided -t infra/github-oidc-template.yaml
@@ -172,10 +173,26 @@ neither is something CI should do to itself:
    OIDCProviderArn=<existing arn>` instead of letting this template create a second one — IAM
    only allows one per account.
 
-2. **Add a lifecycle rule to the SAM-managed artifacts bucket.** `sam deploy --resolve-s3`
-   (used by both `infra/samconfig-backend.toml` and `infra/samconfig-hosting.toml`) uploads a
-   new build zip to this bucket on every deploy but never deletes old ones — left alone that
-   grows forever. One-time fix:
+   The trust condition matches GitHub's OIDC `sub` claim **exactly**, including the immutable
+   numeric org/repo IDs GitHub embeds alongside the names (`repo:{org}@{orgId}/{repo}@{repoId}
+   :ref:refs/heads/main`) — a `StringLike` match on names alone stopped working once GitHub added
+   this. Pass your own via the `GitHubOrgId`/`RepositoryId` template parameters, found with:
+   ```bash
+   gh api users/<org> --jq .id        # or orgs/<org> for a GitHub org, not a personal account
+   gh api repos/<org>/<repo> --jq .id
+   ```
+
+2. **Point `s3_bucket` at the SAM-managed artifacts bucket explicitly.** `infra/samconfig-
+   backend.toml` and `infra/samconfig-hosting.toml` set `s3_bucket = "<bucket name>"` rather than
+   `resolve_s3 = true`. `resolve_s3` asks the SAM CLI to look up (or create) the bucket at deploy
+   time, which needs broader S3 permissions than the CI role deliberately has — the least-
+   privilege deploy role in `infra/github-oidc-template.yaml` is scoped to exactly one named
+   bucket. Find the bucket once (`aws s3 ls | grep aws-sam-cli-managed-default-
+   samclisourcebucket`) and pin it in both `samconfig-*.toml` files and as the
+   `SamArtifactsBucketName` parameter when deploying the OIDC template.
+
+3. **Add a lifecycle rule to that bucket**, since neither `sam deploy` nor CloudFormation deletes
+   old build zips on their own — left alone that grows forever:
    ```bash
    BUCKET=$(aws s3 ls | grep aws-sam-cli-managed-default-samclisourcebucket | awk '{print $3}')
    aws s3api put-bucket-lifecycle-configuration --bucket "$BUCKET" --lifecycle-configuration '{
@@ -189,6 +206,8 @@ neither is something CI should do to itself:
    }'
    ```
 
-Once both are done, a push to `main` builds/tests, deploys the backend stack, then rebuilds the
+With all three done, a push to `main` builds/tests, deploys the backend stack, then rebuilds the
 dashboard against the live `ApiEndpoint` and syncs it to the hosting bucket — see the `deploy-*`
-jobs in `.github/workflows/ci.yml`.
+jobs in `.github/workflows/ci.yml`. Both jobs have gone green end to end; see
+[`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) Phase 6 for the debugging history behind steps
+1 and 2 above.

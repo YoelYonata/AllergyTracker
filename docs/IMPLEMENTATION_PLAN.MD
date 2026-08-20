@@ -163,17 +163,46 @@ that routes internally. Four routes rather than the three originally planned:
   A Budget alert (`$1`/month, fires at $0.01 actual spend, emails on breach) was already in place
   before this deploy.
 
-## Phase 5 — Web dashboard (React) — built, not yet hosted
+## History range & retention ✅
+
+Added after Phase 5/6 landed, ahead of Phase 7: the trend chart originally showed a fixed 14 days
+with no way to see further back, and readings sat in DynamoDB for a full year (`READING_TTL_DAYS`
+defaulted to 365) even though nothing ever read that far. Two changes, both free:
+
+- **Selectable range.** `GET /pollen/{location}/history?days=N` now accepts up to 90 (was 30);
+  the dashboard's trend chart got a 30-day/90-day toggle (`TrendChart`, state lifted to `App.tsx`
+  so switching ranges just re-fetches with a different `days` value — no new endpoint). 30 is the
+  default: it's the common case and the smaller payload, and DynamoDB Query cost/latency scale
+  with items returned, so a page load doesn't pull 90 days nobody asked to see yet.
+- **Retention capped to match.** `READING_TTL_DAYS` default dropped from 365 to 90 — there's no
+  reason to keep data the UI can never show. Deletion is DynamoDB's native **TTL**, not a cleanup
+  Lambda: items past their `ttl` epoch-seconds attribute (set once, at write time, in
+  `store.put_reading()`) are removed by DynamoDB in the background at no cost -- TTL deletes don't
+  consume write capacity or invoke anything, unlike a scheduled delete job would. See
+  [`DATA_MODEL.md`](DATA_MODEL.md#pollen-reading) for the item shape and
+  [`CONFIGURATION.md`](CONFIGURATION.md#environment-variables) for the env var.
+- **Why 90 and not, say, 60 or 180:** 90 covers a full pollen season (tree/grass/weed seasons
+  each run a few months) while keeping per-location item count -- and therefore Query cost, which
+  is what actually scales with data volume here -- an order of magnitude smaller than the old
+  365-day retention. `PAY_PER_REQUEST` billing means this was never a *capacity* cost, only a
+  storage-and-Query-size one, both already close to free; the cap is about keeping the trend
+  chart meaningful (a season, not a blurry year) more than about the dollars.
+- TTL deletion isn't instant -- DynamoDB documents it as "typically within 48 hours" of
+  expiry -- so briefly having 91-92 days of data around is expected, not a bug.
+
+## Phase 5 — Web dashboard (React) ✅
 
 - Vite + React + TypeScript, scaffolded in `ui/` (see `ui/README.md`). `src/api.ts` is the only
   thing that talks to the backend, calling the Phase 4 Read API -- the browser never touches
   DynamoDB.
 - Today's view (`TodaySummary`): current UPI + category per pollen type for the selected
   location.
-- Trend chart (`TrendChart`): last 14 days via `GET /pollen/{location}/history`, built with
+- Trend chart (`TrendChart`): 30 or 90 days via `GET /pollen/{location}/history`, built with
   Recharts. Uses the dataviz skill's validated 3-color categorical palette (one fixed color per
   pollen type, not cycled), a single 0-5 axis (no dual-axis), legend + tooltip so identity never
-  depends on color alone, and light/dark tokens driven by `prefers-color-scheme`.
+  depends on color alone, and light/dark tokens driven by `prefers-color-scheme`. A range toggle
+  in the chart header lets the user switch between the two windows -- see "History range &
+  retention" below for why 30/90 and not something else.
 - Subscribe form (`SubscribeForm`): email + threshold, posts to `/subscribe`, surfaces the API's
   202/error message.
 - Verified with a headless-browser smoke test (Playwright) against the **live deployed API**,
@@ -186,25 +215,44 @@ that routes internally. Four routes rather than the three originally planned:
   from `*` to that exact CloudFront domain once it existed, per the plan below; verified the
   live site still loads with no console errors after the change.
 
-## Phase 6 — Deployment & CI — CI/CD wired, awaiting one-time AWS setup
+## Phase 6 — Deployment & CI ✅
 
 Goal: push a commit to `main` and have both the backend and dashboard deploy themselves, with
 tests gating the merge — no long-lived AWS credentials stored anywhere.
 
-**`.github/workflows/ci.yml` is written and its non-AWS jobs verified locally** (`ruff check`,
-`pytest`, `sam validate --lint` on all three templates, `npm run lint`/`npm run build` all pass —
-see the commands each job runs). What's not yet done, and needs the repo owner to do it by hand
-once (CI shouldn't grant itself deploy access) — steps are in
-[`CONFIGURATION.md`](CONFIGURATION.md#cicd-one-time-setup-phase-6):
+**Live end to end.** `.github/workflows/ci.yml` runs `ruff check`/`pytest`/`sam validate
+--lint`/`npm run lint`/`npm run build` on every PR and push, and `deploy-backend` +
+`deploy-frontend` have both gone green on a push to `main` via the GitHub OIDC role in
+`infra/github-oidc-template.yaml`. The one-time setup (deploy the OIDC role, add its `RoleArn` as
+the `AWS_DEPLOY_ROLE_ARN` GitHub repo secret, add the artifacts-bucket lifecycle rule) is done —
+see [`CONFIGURATION.md`](CONFIGURATION.md#cicd-one-time-setup-phase-6) if it ever needs redoing
+in a different account.
 
-1. Deploy `infra/github-oidc-template.yaml` and add its `RoleArn` output as the
-   `AWS_DEPLOY_ROLE_ARN` GitHub repo secret.
-2. Add the lifecycle rule to the SAM-managed artifacts bucket (the "nice-to-have" below, now
-   with the actual command).
+Getting from "written" to "actually deploys" took three follow-up fixes, each surfaced by a real
+failed run rather than caught by `sam validate --lint` (which doesn't check IAM trust policies or
+account-specific bucket names):
 
-Until those are done, `deploy-backend`/`deploy-frontend` will fail on `AWS_DEPLOY_ROLE_ARN` not
-being set — the test/lint/build jobs run and gate merges regardless, so this is safe to merge
-before that setup happens.
+1. **GitHub's OIDC `sub` claim now embeds immutable numeric org/repo IDs, not just names**
+   (`repo:{org}@{orgId}/{repo}@{repoId}:ref:...`, a change GitHub made across 2025/2026 so a
+   renamed/transferred repo can't inherit an old trust relationship). The trust policy's
+   `StringLike` match on `{org}/{repo}:ref:...` alone no longer matched — switched to an exact
+   `StringEquals` against the full claim, with `GitHubOrgId`/`RepositoryId` template parameters
+   (found via `gh api users/<org>` / `repos/<org>/<repo>`).
+2. **`samconfig-backend.toml`/`samconfig-hosting.toml` used `resolve_s3 = true`**, which asks the
+   SAM CLI to look up (or create) the managed artifacts bucket at deploy time — fine locally
+   where credentials can call `s3:CreateBucket`/`ListAllMyBuckets`, but the CI role is
+   deliberately scoped to only the one named bucket (see `infra/github-oidc-template.yaml`), so
+   the lookup failed under least-privilege. Pinned to an explicit `s3_bucket = "..."` instead —
+   same bucket, no runtime discovery.
+3. **`sam deploy` creates a CloudFormation *change set* under the hood**, which — because
+   `template.yaml` uses the SAM transform — requires `cloudformation:CreateChangeSet` on the
+   `AWS::Serverless-2016-10-31` transform ARN specifically, a permission separate from
+   `cloudformation:*` on the stack itself. Added once the failure showed the gap.
+
+None of these three needed touching the app code or the CI workflow file itself — all three
+fixes live in `infra/github-oidc-template.yaml` / `infra/samconfig-*.toml`, which is the point of
+keeping deploy IAM in its own least-privilege template: tightening it is iterative and low-risk
+to get wrong in the direction of "too narrow, fails safe."
 
 ### Dashboard hosting (done, ahead of the rest of this phase)
 
@@ -218,8 +266,8 @@ before that setup happens.
   directly reachable.
 - `PriceClass_100` (cheapest edge tier) and the default `*.cloudfront.net` certificate — no ACM,
   no Route 53 hosted zone, since a custom domain isn't needed yet.
-- Deploy was manual (`npm run build` in `ui/`, then `aws s3 sync ui/dist/ s3://<bucket>`) —
-  now wired into the `deploy-frontend` job below, once the one-time AWS setup is done.
+- Deploy was manual at first (`npm run build` in `ui/`, then `aws s3 sync ui/dist/ s3://<bucket>`)
+  — now fully replaced by the `deploy-frontend` job below.
 
 ### Backend (SAM)
 
@@ -252,8 +300,9 @@ before that setup happens.
   above pass. Authenticated via **GitHub OIDC federation**
   (`aws-actions/configure-aws-credentials` with `role-to-assume`) — *not* long-lived
   `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` secrets. GitHub issues a short-lived token per run
-  that the IAM role trusts only for `repo:<org>/<repo>:ref:refs/heads/main`; nothing durable ever
-  sits in GitHub Secrets except the role's ARN itself, which grants nothing on its own.
+  that the IAM role trusts only for an exact match on
+  `repo:<org>@<org-id>/<repo>@<repo-id>:ref:refs/heads/main` (see fix #1 above); nothing durable
+  ever sits in GitHub Secrets except the role's ARN itself, which grants nothing on its own.
   - `deploy-backend`: `sam build && sam deploy --config-file infra/samconfig-backend.toml`.
   - `deploy-frontend`: rebuilds the dashboard against the just-deployed stack's real
     `ApiEndpoint` (fetched via `aws cloudformation describe-stacks`, not hardcoded), syncs
@@ -270,9 +319,8 @@ before that setup happens.
   the two S3 buckets), not `AdministratorAccess` or blanket `cloudformation:*`/`s3:*` on the
   account — same least-privilege principle as the Phase 0 IAM user and the Phase 4 API Lambda's
   three-verb DynamoDB policy.
-- Verified locally, short of an actual AWS deploy (which needs the OIDC role to exist first —
-  see above): `ruff check`, `pytest`, `sam validate --lint` on all three templates, `npm run
-  lint`, and `npm run build` all pass as of this change.
+- Verified for real: `deploy-backend` and `deploy-frontend` have both gone green on a push to
+  `main`, not just validated locally.
 
 ### Nice-to-have once the basics work
 

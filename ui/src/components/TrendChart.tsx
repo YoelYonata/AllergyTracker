@@ -104,23 +104,64 @@ function TrendLegend({ isDark }: { isDark: boolean }) {
   );
 }
 
-interface Props {
-  readings: Reading[];
+export type HistoryRangeDays = 30 | 90;
+
+const RANGE_OPTIONS: HistoryRangeDays[] = [30, 90];
+
+function RangeToggle({
+  value,
+  onChange,
+}: {
+  value: HistoryRangeDays;
+  onChange: (days: HistoryRangeDays) => void;
+}) {
+  return (
+    <div className="trend-range-toggle" role="group" aria-label="History range">
+      {RANGE_OPTIONS.map((days) => (
+        <button
+          key={days}
+          type="button"
+          className={`trend-range-toggle__btn${days === value ? " trend-range-toggle__btn--active" : ""}`}
+          aria-pressed={days === value}
+          onClick={() => onChange(days)}
+        >
+          {days}d
+        </button>
+      ))}
+    </div>
+  );
 }
 
-export function TrendChart({ readings }: Props) {
+interface Props {
+  readings: Reading[];
+  rangeDays: HistoryRangeDays;
+  onRangeChange: (days: HistoryRangeDays) => void;
+}
+
+export function TrendChart({ readings, rangeDays, onRangeChange }: Props) {
   const isDark = useDarkMode();
   const c = chrome(isDark);
 
   if (readings.length === 0) {
-    return <div className="trend-chart trend-chart--empty">No history yet for this location.</div>;
+    return (
+      <div className="trend-chart trend-chart--empty">
+        <div className="trend-chart__header">
+          <h2>Trend</h2>
+          <RangeToggle value={rangeDays} onChange={onRangeChange} />
+        </div>
+        No history yet for this location.
+      </div>
+    );
   }
 
   const data = toChartRows(readings);
 
   return (
     <div className="trend-chart">
-      <h2>Trend</h2>
+      <div className="trend-chart__header">
+        <h2>Trend</h2>
+        <RangeToggle value={rangeDays} onChange={onRangeChange} />
+      </div>
       <ResponsiveContainer width="100%" height={280}>
         <LineChart data={data} margin={{ top: 8, right: 24, bottom: 8, left: 0 }}>
           <CartesianGrid stroke={c.gridline} vertical={false} />

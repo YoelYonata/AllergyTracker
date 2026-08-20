@@ -20,7 +20,7 @@ except ImportError:
 
 DDB_TABLE_NAME = os.getenv("DDB_TABLE_NAME", "allergy-tracker")
 FORECAST_DAYS = int(os.getenv("FORECAST_DAYS", "3"))
-READING_TTL_DAYS = int(os.getenv("READING_TTL_DAYS", "365"))
+READING_TTL_DAYS = int(os.getenv("READING_TTL_DAYS", "90"))
 DEFAULT_THRESHOLD = int(os.getenv("DEFAULT_THRESHOLD", "3"))
 
 # Used by the notify and api Lambdas as the SES "From" address -- must be a verified SES identity.

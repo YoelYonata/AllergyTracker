@@ -35,9 +35,11 @@ from common.store import Store
 logger = logging.getLogger()
 logger.setLevel(os.getenv("LOG_LEVEL", "INFO"))
 
-DEFAULT_HISTORY_DAYS = 14
+DEFAULT_HISTORY_DAYS = 30
 # Bounded so a hand-edited ?days=100000 can't turn one request into a huge paginated Query.
-MAX_HISTORY_DAYS = 30
+# Matches READING_TTL_DAYS (see common/config.py) -- no point allowing a range longer than what
+# retention actually keeps around.
+MAX_HISTORY_DAYS = 90
 
 VALID_POLLEN_TYPES = {"GRASS", "TREE", "WEED"}
 # UPI is a 0-5 scale; a threshold outside it is either always-on or never-on, so reject it.

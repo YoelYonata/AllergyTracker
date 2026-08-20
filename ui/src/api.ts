@@ -23,7 +23,7 @@ export function getLatest(locationId: string): Promise<LatestResponse> {
   return request(`/pollen/${encodeURIComponent(locationId)}/latest`);
 }
 
-export function getHistory(locationId: string, days = 14): Promise<HistoryResponse> {
+export function getHistory(locationId: string, days = 30): Promise<HistoryResponse> {
   return request(`/pollen/${encodeURIComponent(locationId)}/history?days=${days}`);
 }
 

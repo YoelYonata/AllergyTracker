@@ -15,20 +15,27 @@ yet, see Phase 6 of the plan)
 3. New subscribers go through double opt-in: created `PENDING`, and a third job (`confirm`,
    a public Lambda Function URL) has to see the right one-time token before they become
    `CONFIRMED` and start receiving alerts.
-4. A **web dashboard** reads today's levels and the trend history through a **read API**
+4. The **web dashboard** itself is a static React build served from **S3 via CloudFront**
+   (Origin Access Control, no direct public S3 access). Once loaded in the browser, it reads
+   today's levels and the trend history (a user-selectable 30 or 90 days) through a **read API**
    (API Gateway HTTP API + Lambda), never straight from DynamoDB — there's no safe way to scope
    database credentials in a browser. The same API serves the subscribe form, which kicks off
    the opt-in email in step 3.
+5. A **GitHub Actions** workflow tests/lints/builds every push, and on push to `main` deploys the
+   backend stack and rebuilds+syncs the dashboard, authenticated via short-lived **GitHub OIDC**
+   credentials rather than any AWS keys stored in the repo.
 
 ```mermaid
 flowchart TD
     A["Pollen Data API<br/><sub>Google Pollen API</sub>"] --> B["Ingest<br/><sub>AWS Lambda + EventBridge schedule</sub>"]
-    B --> C[("Database<br/><sub>AWS DynamoDB</sub><br/><sub>pollen history + subscriber list</sub>")]
+    B --> C[("Database<br/><sub>AWS DynamoDB</sub><br/><sub>pollen history + subscriber list, 90-day TTL</sub>")]
     C -- "DynamoDB Stream<br/><sub>new/updated readings only</sub>" --> N["Notify<br/><sub>AWS Lambda</sub>"]
     N -- "threshold breached" --> S["SES<br/><sub>alert email</sub>"]
     F["Confirm link<br/><sub>clicked from opt-in email</sub>"] --> G["Confirm<br/><sub>Lambda Function URL</sub>"]
     G -- "PENDING &rarr; CONFIRMED" --> C
-    D["Web Dashboard<br/><sub>React</sub><br/><sub>today's view + trend chart</sub>"] <--> R["Read API<br/><sub>API Gateway HTTP API + Lambda</sub><br/><sub>/locations · /latest · /history · /subscribe</sub>"]
+    HOST[("S3<br/><sub>static dashboard build</sub>")] --> CF["CloudFront<br/><sub>CDN, Origin Access Control</sub>"]
+    CF -- "page load" --> D["Web Dashboard<br/><sub>React, in the browser</sub><br/><sub>today's view + trend chart (30/90d)</sub>"]
+    D <--> R["Read API<br/><sub>API Gateway HTTP API + Lambda</sub><br/><sub>/locations · /latest · /history · /subscribe</sub>"]
     R <--> C
     R -- "new subscriber" --> S2["SES<br/><sub>confirmation email</sub>"]
     S2 --> F
@@ -42,10 +49,12 @@ flowchart TD
 | Ingestion job        | AWS Lambda + EventBridge (scheduled rule) | Serverless, cheap, runs a few times a day |
 | Database              | AWS DynamoDB                    | Single-table design: pollen history + subscribers |
 | Read API              | API Gateway **HTTP API** + Lambda | Sits between dashboard and DynamoDB; HTTP API, not REST — ~3.5x cheaper per request |
-| Web dashboard         | React                            | Today's view, trend chart, subscribe form |
+| Web dashboard         | React                            | Today's view, trend chart with a 30/90-day range toggle, subscribe form |
+| Static hosting         | S3 + CloudFront                 | Private bucket, reachable only via CloudFront's Origin Access Control; `PriceClass_100`, default `*.cloudfront.net` domain — see Phase 6 of the plan |
 | Email notifier        | AWS SES + Lambda                 | Triggered by DynamoDB Streams, decoupled from ingestion |
 | Double opt-in confirm | Lambda Function URL              | Free, single public route — not folded into the read API |
-| Infra as code         | AWS SAM                          | Decided in Phase 0 — simplest fit for a Lambda-centric app |
+| Infra as code         | AWS SAM (backend) + plain CloudFormation (hosting, OIDC role) | SAM for the Lambda-centric backend stack; S3/CloudFront and the CI IAM role are pure CloudFormation since neither is serverless compute |
+| CI/CD                  | GitHub Actions + GitHub OIDC federation | Tests/lints/builds every push; deploys both stacks on push to `main` with no long-lived AWS keys in GitHub Secrets |
 
 ## Repository layout
 
@@ -142,15 +151,15 @@ API=$(aws cloudformation describe-stacks --stack-name allergy-tracker \
 
 curl "$API/locations"
 curl "$API/pollen/vancouver/latest"
-curl "$API/pollen/vancouver/history?days=7"
+curl "$API/pollen/vancouver/history?days=30"   # days defaults to 30, capped at 90
 curl -X POST "$API/subscribe" -H 'Content-Type: application/json' \
   -d '{"email":"you@example.com","location":"vancouver","threshold":0}'
 ```
 
 ### 6. Web dashboard (React)
 
-Location picker, today's-pollen cards (with per-allergen icons), a trend chart, and a subscribe
-form — talks only to the read API above, never to DynamoDB directly.
+Location picker, today's-pollen cards (with per-allergen icons), a trend chart with a 30/90-day
+range toggle, and a subscribe form — talks only to the read API above, never to DynamoDB directly.
 
 ```bash
 cd ui
@@ -176,6 +185,7 @@ aws s3 sync dist/ s3://<BucketName from the hosting stack output> --delete
 | 2 — Ingestion Lambda | Done — deployed to `ca-central-1`, invoked live, and the 3 written DynamoDB items were independently queried and confirmed to match the data model (including `GRASS` correctly stored as `upi: null`, not `0`) |
 | 3 — Email notifier (SES) | Done — decoupled `notify` Lambda off the DynamoDB Stream, double opt-in via a `confirm` Function URL, verified end to end with real SES sends (delivery attempts confirmed via `get-send-statistics`) |
 | 4 — Read API | Done — HTTP API + `api` Lambda (`/locations`, `/latest`, `/history`, `/subscribe`), per-route throttling, CORS; deployed to the live stack via a reviewed changeset and verified against it (all four routes hit for real, including a `POST /subscribe` against an already-confirmed address to check the overwrite guard) |
-| 5 — React dashboard | Done — location picker, today's-pollen cards with per-allergen icons and a brand identity, Recharts trend line, subscribe form; verified in a headless browser (light + dark, no console errors) against the live API |
-| 6 — Deployment & CI | CI/CD written (`.github/workflows/ci.yml`: tests/lint/build on every PR and push, deploy on push to `main` via GitHub OIDC, no long-lived AWS keys) but not yet live — needs a one-time manual deploy of `infra/github-oidc-template.yaml` and a GitHub secret, see [`CONFIGURATION.md`](docs/CONFIGURATION.md#cicd-one-time-setup-phase-6). Until then both stacks still deploy manually as described below |
+| 5 — React dashboard | Done — location picker, today's-pollen cards with per-allergen icons and a brand identity, Recharts trend line with a 30/90-day range toggle, subscribe form; verified in a headless browser (light + dark, no console errors) against the live API |
+| 6 — Deployment & CI | Done — `.github/workflows/ci.yml` tests/lints/builds on every PR and push, and `deploy-backend`/`deploy-frontend` have both gone green on push to `main` via GitHub OIDC (no long-lived AWS keys). Took three follow-up IAM fixes (GitHub's immutable org/repo IDs, an explicit artifacts bucket instead of `resolve_s3`, a `CreateChangeSet` permission on the SAM transform) — see [`IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md#phase-6--deployment--ci-) |
 | 7 — Observability | Partial — error alarm + log retention in the template; SNS alerting and custom metrics not yet added |
+| History range & retention | Done, ahead of Phase 7 — trend chart's history range is user-selectable (30/90 days) and DynamoDB TTL now caps stored readings at 90 days to match, down from 365; see [`IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md#history-range--retention) |
