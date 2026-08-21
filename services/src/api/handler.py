@@ -21,19 +21,20 @@ Run locally from services/src/:
 """
 import base64
 import json
-import logging
-import os
 import re
 import sys
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
+from aws_lambda_powertools import Logger, Metrics, Tracer
+
 from common import config, ses
 from common.store import Store
 
-logger = logging.getLogger()
-logger.setLevel(os.getenv("LOG_LEVEL", "INFO"))
+logger = Logger(service="api")
+tracer = Tracer(service="api")
+metrics = Metrics(namespace="AllergyTracker", service="api")
 
 DEFAULT_HISTORY_DAYS = 30
 # Bounded so a hand-edited ?days=100000 can't turn one request into a huge paginated Query.
@@ -268,7 +269,9 @@ def _post_subscribe(store: Store, event: dict) -> dict:
         # Already CONFIRMED. Nothing to do, and the response must look identical to a real
         # signup so this endpoint can't be used to probe which addresses are subscribed.
         logger.info(
-            "Subscribe no-op: %s already confirmed for %s", data["email"], data["location_id"]
+            "Subscribe no-op: already confirmed",
+            email=data["email"],
+            location_id=data["location_id"],
         )
         return _json_response(202, {"message": SUBSCRIBE_ACCEPTED_MESSAGE})
 
@@ -285,10 +288,12 @@ def _post_subscribe(store: Store, event: dict) -> dict:
         # The PENDING item exists but the link never arrived. Say so rather than returning a
         # success the caller would be waiting on forever -- re-posting is safe and re-issues
         # the token, since the item is still PENDING.
-        logger.exception("Failed to send confirmation email to %s", data["email"])
+        logger.exception("Failed to send confirmation email", email=data["email"])
         return _error(502, "Couldn't send the confirmation email. Please try again shortly.")
 
-    logger.info("Sent confirmation email to %s for %s", data["email"], data["location_id"])
+    logger.info(
+        "Sent confirmation email", email=data["email"], location_id=data["location_id"]
+    )
     return _json_response(202, {"message": SUBSCRIBE_ACCEPTED_MESSAGE})
 
 
@@ -302,6 +307,9 @@ ROUTES = {
 }
 
 
+@logger.inject_lambda_context(log_event=False)
+@tracer.capture_lambda_handler
+@metrics.log_metrics(capture_cold_start_metric=True)
 def handler(event, context):
     event = event or {}
     route_key = event.get("routeKey")
@@ -309,7 +317,7 @@ def handler(event, context):
     if route is None:
         # Only reachable if the template declares a route this module doesn't implement --
         # anything else is rejected by API Gateway before it gets here.
-        logger.warning("No handler for routeKey %r", route_key)
+        logger.warning("No handler for routeKey", route_key=route_key)
         return _error(404, "Not found.")
 
     store = Store(config.DDB_TABLE_NAME, ttl_days=config.READING_TTL_DAYS)
@@ -317,11 +325,12 @@ def handler(event, context):
         return route(store, event)
     except Exception:
         # Never let a stack trace reach the browser; it's in CloudWatch instead.
-        logger.exception("Unhandled error serving %s", route_key)
+        logger.exception("Unhandled error serving route", route_key=route_key)
         return _error(500, "Internal server error.")
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    from common.local_context import LocalLambdaContext
+
     event = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {"routeKey": "GET /locations"}
-    print(json.dumps(handler(event, None), indent=2, default=str))
+    print(json.dumps(handler(event, LocalLambdaContext()), indent=2, default=str))

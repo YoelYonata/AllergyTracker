@@ -60,7 +60,7 @@ flowchart TD
 
 ```
 .github/workflows/ci.yml      # Test/lint/build on every PR+push; deploy both stacks on push to main
-infra/template.yaml           # AWS SAM stack: table, 4 Lambdas, schedule, stream trigger, HTTP API, Function URL, alarm
+infra/template.yaml           # AWS SAM stack: table, 4 Lambdas, schedule, stream trigger, HTTP API, Function URL, alarms/SNS/dashboard
 infra/hosting-template.yaml   # Static hosting stack: S3 + CloudFront for the dashboard
 infra/github-oidc-template.yaml   # One-time: IAM role CI assumes via GitHub OIDC (no long-lived AWS keys)
 infra/samconfig-*.toml        # Non-interactive `sam deploy` config, shared by CI and local deploys
@@ -126,7 +126,10 @@ aws ssm put-parameter --name /allergy-tracker/google-pollen-api-key \
 aws ses verify-email-identity --email-address you@example.com
 
 sam build -t infra/template.yaml --use-container
-sam deploy --guided -t infra/template.yaml --parameter-overrides SesSenderEmail=you@example.com
+sam deploy --guided -t infra/template.yaml \
+  --parameter-overrides SesSenderEmail=you@example.com AlarmEmail=you@example.com
+# AWS emails an SNS subscription-confirmation link to AlarmEmail after this -- click it, or the
+# CloudWatch alarms below have nowhere to actually send a notification.
 
 # Tell the ingestion job which locations to fetch
 DDB_TABLE_NAME=allergy-tracker python scripts/seed_locations.py
@@ -187,5 +190,5 @@ aws s3 sync dist/ s3://<BucketName from the hosting stack output> --delete
 | 4 — Read API | Done — HTTP API + `api` Lambda (`/locations`, `/latest`, `/history`, `/subscribe`), per-route throttling, CORS; deployed to the live stack via a reviewed changeset and verified against it (all four routes hit for real, including a `POST /subscribe` against an already-confirmed address to check the overwrite guard) |
 | 5 — React dashboard | Done — location picker, today's-pollen cards with per-allergen icons and a brand identity, Recharts trend line with a 30/90-day range toggle, subscribe form; verified in a headless browser (light + dark, no console errors) against the live API |
 | 6 — Deployment & CI | Done — `.github/workflows/ci.yml` tests/lints/builds on every PR and push, and `deploy-backend`/`deploy-frontend` have both gone green on push to `main` via GitHub OIDC (no long-lived AWS keys). Took three follow-up IAM fixes (GitHub's immutable org/repo IDs, an explicit artifacts bucket instead of `resolve_s3`, a `CreateChangeSet` permission on the SAM transform) — see [`IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md#phase-6--deployment--ci-) |
-| 7 — Observability | Partial — error alarm + log retention in the template; SNS alerting and custom metrics not yet added |
+| 7 — Observability & polish | Done — `aws-lambda-powertools` structured logging/EMF metrics/X-Ray tracing in all four Lambdas, six CloudWatch alarms (Lambda errors/throttles/duration, EventBridge Scheduler target errors, SES bounce/complaint rate) routed to one SNS topic, and a CloudWatch dashboard; see [`IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md#phase-7--observability--polish-) |
 | History range & retention | Done, ahead of Phase 7 — trend chart's history range is user-selectable (30/90 days) and DynamoDB TTL now caps stored readings at 90 days to match, down from 365; see [`IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md#history-range--retention) |

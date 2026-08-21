@@ -43,6 +43,12 @@ Parameters:
     Description: >
       CloudWatch Logs retention. Left unset, log groups default to "Never expire" and quietly
       accumulate storage cost forever -- see the cost posture note in docs/IMPLEMENTATION_PLAN.md.
+  AlarmEmail:
+    Type: String
+    Description: >
+      Email address subscribed to the SNS topic every CloudWatch alarm publishes to. Confirm the
+      SNS subscription email AWS sends after the first deploy -- alarms won't reach you until
+      it's confirmed. See docs/CONFIGURATION.md.
 
 Globals:
   Function:
@@ -50,8 +56,33 @@ Globals:
     Timeout: 60
     MemorySize: 256
     Architectures: [arm64]  # Graviton: cheaper per ms than x86 for this workload.
+    # 100k traces/month are free (see cost posture note); worth enabling now that the Phase 4
+    # Read API means a request can actually span more than one Lambda/service. Each function
+    # still needs its own AWSXRayDaemonWriteAccess policy below -- Globals doesn't support
+    # merging Policies across every function's IAM role the way it does other properties.
+    Tracing: Active
 
 Resources:
+  # ---------------------------------------------------------------------------
+  # One SNS topic every CloudWatch alarm in this stack publishes to, so "in ALARM" reaches an
+  # inbox instead of sitting unread in the console. SNS email delivery is free at this volume.
+  # ---------------------------------------------------------------------------
+  AlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: allergy-tracker-alarms
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref AlarmEmail
+
+  # Dedicated schedule group (rather than the account's "default" one) so the EventBridge
+  # Scheduler alarm below has an unambiguous ScheduleGroup dimension to key off -- Scheduler
+  # only publishes CloudWatch metrics per group, not per individual schedule.
+  IngestScheduleGroup:
+    Type: AWS::Scheduler::ScheduleGroup
+    Properties:
+      Name: allergy-tracker
+
   # ---------------------------------------------------------------------------
   # Single-table store. Schema and access patterns: docs/DATA_MODEL.md
   # ---------------------------------------------------------------------------
@@ -118,6 +149,7 @@ Resources:
           POLLEN_API_KEY_PARAM: !Ref PollenApiKeyParam
           FORECAST_DAYS: !Ref ForecastDays
       Policies:
+        - AWSXRayDaemonWriteAccess
         - DynamoDBCrudPolicy:
             TableName: !Ref AllergyTrackerTable
         # Least privilege: read exactly one parameter, not the whole SSM namespace.
@@ -132,6 +164,8 @@ Resources:
         ScheduledIngest:
           Type: ScheduleV2
           Properties:
+            Name: allergy-tracker-ingest-schedule  # Explicit so the alarm below has a fixed dimension to reference.
+            GroupName: !Ref IngestScheduleGroup
             ScheduleExpression: !Ref IngestSchedule
             Description: Periodic pollen ingestion
     DependsOn: IngestFunctionLogGroup
@@ -152,6 +186,100 @@ Resources:
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
+
+  IngestFunctionThrottleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: allergy-tracker-ingest-throttles
+      AlarmDescription: Ingestion Lambda was throttled (concurrency limit reached).
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref IngestFunction
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
+
+  IngestFunctionDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: allergy-tracker-ingest-duration
+      AlarmDescription: >
+        Ingest p99 duration is approaching the function's configured timeout (Globals default,
+        60s) -- catches a slow Pollen API before a run starts timing out outright.
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref IngestFunction
+      ExtendedStatistic: p99
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 48000  # 80% of the 60s Globals timeout, in milliseconds.
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
+
+  IngestScheduleFailedInvocationsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: allergy-tracker-ingest-schedule-target-errors
+      AlarmDescription: >
+        EventBridge Scheduler couldn't invoke the ingest Lambda after retries -- a backstop for
+        the trigger itself failing (e.g. a permissions change), distinct from the Lambda's own
+        Errors alarm above. Note: EventBridge Scheduler's CloudWatch metric for this is named
+        TargetErrorCount, not FailedInvocations (that name belongs to classic EventBridge Rules).
+      Namespace: AWS/Scheduler
+      MetricName: TargetErrorCount
+      Dimensions:
+        - Name: ScheduleGroup
+          Value: !Ref IngestScheduleGroup
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
+
+  # Account-level, not per-function: SES publishes these automatically, no configuration set
+  # needed. Thresholds sit below the levels at which SES itself would throttle/pause sending
+  # (bounce >=10%, complaint >=0.5%), so the alarm fires before AWS takes action, not after.
+  SesBounceRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: allergy-tracker-ses-bounce-rate
+      AlarmDescription: SES account bounce rate is approaching AWS's own sending-pause threshold.
+      Namespace: AWS/SES
+      MetricName: Reputation.BounceRate
+      Statistic: Average
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 0.05
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
+
+  SesComplaintRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: allergy-tracker-ses-complaint-rate
+      AlarmDescription: SES account complaint rate is approaching AWS's own sending-pause threshold.
+      Namespace: AWS/SES
+      MetricName: Reputation.ComplaintRate
+      Statistic: Average
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 0.001
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref AlarmTopic]
 
   # ---------------------------------------------------------------------------
   # Notifier: reacts to new readings via the table's DynamoDB Stream, checks
@@ -175,6 +303,7 @@ Resources:
           DDB_TABLE_NAME: !Ref AllergyTrackerTable
           SES_SENDER_EMAIL: !Ref SesSenderEmail
       Policies:
+        - AWSXRayDaemonWriteAccess
         - DynamoDBCrudPolicy:
             TableName: !Ref AllergyTrackerTable
         # Stream reads are a separate permission from table reads/writes.
@@ -224,6 +353,7 @@ Resources:
         Variables:
           DDB_TABLE_NAME: !Ref AllergyTrackerTable
       Policies:
+        - AWSXRayDaemonWriteAccess
         - DynamoDBCrudPolicy:
             TableName: !Ref AllergyTrackerTable
       FunctionUrlConfig:
@@ -278,6 +408,7 @@ Resources:
           # POST /subscribe emails a link pointing at the confirm function.
           CONFIRM_BASE_URL: !GetAtt ConfirmFunctionUrl.FunctionUrl
       Policies:
+        - AWSXRayDaemonWriteAccess
         # Deliberately not DynamoDBCrudPolicy: that also grants DeleteItem/UpdateItem/Scan,
         # none of which this function does. A public endpoint gets exactly its three verbs.
         - Statement:
@@ -320,6 +451,84 @@ Resources:
             Method: POST
     DependsOn: ApiFunctionLogGroup
 
+  # ---------------------------------------------------------------------------
+  # One dashboard (first 3/account are free forever -- see cost posture note): per-Lambda
+  # invocations/errors/duration, DynamoDB consumed capacity, and the custom EMF metrics the
+  # ingest/notify handlers emit.
+  # ---------------------------------------------------------------------------
+  Dashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: allergy-tracker
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric", "x": 0, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "title": "Lambda invocations",
+                "view": "timeSeries", "stacked": false, "region": "${AWS::Region}", "period": 3600,
+                "metrics": [
+                  ["AWS/Lambda", "Invocations", "FunctionName", "allergy-tracker-ingest", {"stat": "Sum", "label": "ingest"}],
+                  ["AWS/Lambda", "Invocations", "FunctionName", "allergy-tracker-notify", {"stat": "Sum", "label": "notify"}],
+                  ["AWS/Lambda", "Invocations", "FunctionName", "allergy-tracker-confirm", {"stat": "Sum", "label": "confirm"}],
+                  ["AWS/Lambda", "Invocations", "FunctionName", "allergy-tracker-api", {"stat": "Sum", "label": "api"}]
+                ]
+              }
+            },
+            {
+              "type": "metric", "x": 12, "y": 0, "width": 12, "height": 6,
+              "properties": {
+                "title": "Lambda errors",
+                "view": "timeSeries", "stacked": false, "region": "${AWS::Region}", "period": 3600,
+                "metrics": [
+                  ["AWS/Lambda", "Errors", "FunctionName", "allergy-tracker-ingest", {"stat": "Sum", "label": "ingest"}],
+                  ["AWS/Lambda", "Errors", "FunctionName", "allergy-tracker-notify", {"stat": "Sum", "label": "notify"}],
+                  ["AWS/Lambda", "Errors", "FunctionName", "allergy-tracker-confirm", {"stat": "Sum", "label": "confirm"}],
+                  ["AWS/Lambda", "Errors", "FunctionName", "allergy-tracker-api", {"stat": "Sum", "label": "api"}]
+                ]
+              }
+            },
+            {
+              "type": "metric", "x": 0, "y": 6, "width": 12, "height": 6,
+              "properties": {
+                "title": "Lambda duration (avg)",
+                "view": "timeSeries", "stacked": false, "region": "${AWS::Region}", "period": 3600,
+                "metrics": [
+                  ["AWS/Lambda", "Duration", "FunctionName", "allergy-tracker-ingest", {"stat": "Average", "label": "ingest"}],
+                  ["AWS/Lambda", "Duration", "FunctionName", "allergy-tracker-notify", {"stat": "Average", "label": "notify"}],
+                  ["AWS/Lambda", "Duration", "FunctionName", "allergy-tracker-confirm", {"stat": "Average", "label": "confirm"}],
+                  ["AWS/Lambda", "Duration", "FunctionName", "allergy-tracker-api", {"stat": "Average", "label": "api"}]
+                ]
+              }
+            },
+            {
+              "type": "metric", "x": 12, "y": 6, "width": 12, "height": 6,
+              "properties": {
+                "title": "DynamoDB consumed capacity",
+                "view": "timeSeries", "stacked": false, "region": "${AWS::Region}", "period": 3600,
+                "metrics": [
+                  ["AWS/DynamoDB", "ConsumedReadCapacityUnits", "TableName", "allergy-tracker", {"stat": "Sum", "label": "read"}],
+                  ["AWS/DynamoDB", "ConsumedWriteCapacityUnits", "TableName", "allergy-tracker", {"stat": "Sum", "label": "write"}]
+                ]
+              }
+            },
+            {
+              "type": "metric", "x": 0, "y": 12, "width": 24, "height": 6,
+              "properties": {
+                "title": "Pipeline metrics (custom, EMF)",
+                "view": "timeSeries", "stacked": false, "region": "${AWS::Region}", "period": 3600,
+                "metrics": [
+                  ["AllergyTracker", "LocationsFailed", "service", "ingest", {"stat": "Sum", "label": "locations failed"}],
+                  ["AllergyTracker", "ReadingsWritten", "service", "ingest", {"stat": "Sum", "label": "readings written"}],
+                  ["AllergyTracker", "AlertsSent", "service", "notify", {"stat": "Sum", "label": "alerts sent"}],
+                  ["AllergyTracker", "BreachesDetected", "service", "notify", {"stat": "Sum", "label": "breaches detected"}]
+                ]
+              }
+            }
+          ]
+        }
+
 Outputs:
   ApiEndpoint:
     Description: Base URL of the read API (feed into the dashboard's VITE_API_BASE_URL)
@@ -339,3 +548,9 @@ Outputs:
   ConfirmFunctionUrl:
     Description: Public URL for the double opt-in confirm link (feed into CONFIRM_BASE_URL)
     Value: !GetAtt ConfirmFunctionUrl.FunctionUrl
+  AlarmTopicArn:
+    Description: SNS topic every CloudWatch alarm publishes to
+    Value: !Ref AlarmTopic
+  DashboardUrl:
+    Description: CloudWatch dashboard for this stack
+    Value: !Sub https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${Dashboard}

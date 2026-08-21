@@ -10,15 +10,16 @@ Run locally from services/src/: python -m confirm.handler
 """
 import html
 import json
-import logging
-import os
 import sys
+
+from aws_lambda_powertools import Logger, Metrics, Tracer
 
 from common import config
 from common.store import Store
 
-logger = logging.getLogger()
-logger.setLevel(os.getenv("LOG_LEVEL", "INFO"))
+logger = Logger(service="confirm")
+tracer = Tracer(service="confirm")
+metrics = Metrics(namespace="AllergyTracker", service="confirm")
 
 
 def _html_response(status_code: int, message: str) -> dict:
@@ -33,6 +34,9 @@ def _html_response(status_code: int, message: str) -> dict:
     }
 
 
+@logger.inject_lambda_context(log_event=False)
+@tracer.capture_lambda_handler
+@metrics.log_metrics(capture_cold_start_metric=True)
 def handler(event, context):
     params = (event or {}).get("queryStringParameters") or {}
     location_id = params.get("location_id")
@@ -44,16 +48,19 @@ def handler(event, context):
 
     store = Store(config.DDB_TABLE_NAME)
     if store.confirm_subscriber(location_id, email, token):
-        logger.info("Confirmed subscriber %s for %s", email, location_id)
+        logger.info("Confirmed subscriber", email=email, location_id=location_id)
         return _html_response(
             200, "Subscription confirmed — you'll now receive pollen alerts for this location."
         )
 
-    logger.info("Confirm failed for %s / %s (bad or already-used token)", email, location_id)
+    logger.info(
+        "Confirm failed (bad or already-used token)", email=email, location_id=location_id
+    )
     return _html_response(400, "This confirmation link is invalid or has already been used.")
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+    from common.local_context import LocalLambdaContext
+
     event = json.loads(sys.argv[1]) if len(sys.argv) > 1 else {"queryStringParameters": {}}
-    print(json.dumps(handler(event, None), indent=2, default=str))
+    print(json.dumps(handler(event, LocalLambdaContext()), indent=2, default=str))

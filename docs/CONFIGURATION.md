@@ -82,6 +82,38 @@ Defense in depth, worth doing even though the key is stored safely on the AWS si
 | `SES_SENDER_EMAIL` | Notify + api | Yes | Verified SES identity used as the "From" address on alert and confirmation emails |
 | `CONFIRM_BASE_URL` | Api Lambda, and local `seed_subscriber.py` | Yes, to subscribe | The deployed `ConfirmFunction`'s Function URL. The template wires this into the api Lambda automatically; only set it by hand for local script runs — see the stack Outputs after `sam deploy` |
 
+## Observability (Phase 7)
+
+- **Structured logs.** All four Lambdas use `aws-lambda-powertools`'s `Logger` instead of the
+  stdlib `logging` module — every log line is JSON with a correlation ID
+  (`function_request_id`), cold-start flag, and whatever keyword fields the call site passed
+  (e.g. `logger.info("Stored readings for location", location_id=..., readings_written=...)`).
+  Query them in **CloudWatch Logs Insights** rather than grepping raw text, e.g.:
+  ```
+  fields @timestamp, location_id, readings_written, max_upi_today
+  | filter @message = "Stored readings for location"
+  | sort @timestamp desc
+  ```
+- **Custom metrics (EMF).** `ingest` emits `LocationsFailed`/`ReadingsWritten`; `notify` emits
+  `AlertsSent`/`BreachesDetected` — all in the `AllergyTracker` CloudWatch namespace, dimensioned
+  by `service`. Emitted via CloudWatch's Embedded Metric Format (a specially-shaped log line),
+  so there's no extra API call or cost beyond the log line itself already being written.
+- **X-Ray tracing.** `Tracing: Active` in the template's `Globals`, now that the Phase 4 Read API
+  gives requests something to actually span. 100k traces/month are free — see the cost posture
+  note in `IMPLEMENTATION_PLAN.md`.
+- **Alarms**, all published to one SNS topic (`AlarmTopic` / `allergy-tracker-alarms`):
+  ingest `Errors`, ingest `Throttles`, ingest `Duration` p99 (approaching the 60s timeout), the
+  EventBridge Scheduler `TargetErrorCount` (the trigger itself failing, not the Lambda), and SES
+  account-level `Reputation.BounceRate`/`Reputation.ComplaintRate`. **The `AlarmEmail` parameter
+  is required** — after the first deploy, AWS emails that address an SNS subscription
+  confirmation link; alarms won't actually notify anyone until it's clicked.
+- **Dashboard.** One CloudWatch dashboard (`allergy-tracker`) with per-Lambda
+  invocations/errors/duration, DynamoDB consumed capacity, and the custom pipeline metrics above.
+  The stack's `DashboardUrl` output links straight to it.
+- **Log retention.** Every Lambda's log group has an explicit `RetentionInDays` (the
+  `LogRetentionDays` parameter, default 30) — CloudWatch Logs defaults to "Never expire," which
+  quietly accumulates storage cost forever.
+
 ## Read API (Phase 4)
 
 The dashboard talks to an **API Gateway HTTP API** rather than reading DynamoDB from the

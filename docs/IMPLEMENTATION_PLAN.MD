@@ -329,54 +329,91 @@ to get wrong in the direction of "too narrow, fails safe."
 - `pip-audit` / `npm audit` as a non-blocking scheduled (weekly) job rather than a per-PR gate —
   `pip-audit` is already in `services/requirements-dev.txt`, just not wired into a workflow yet.
 
-## Phase 7 — Observability & polish
+## Phase 7 — Observability & polish ✅
 
 Goal: know a run failed (or is about to) from an alert, not from noticing the dashboard looks
 stale — while keeping log/metric storage inside the always-free tiers.
 
 ### Structured logging
 
-- Adopt **`aws-lambda-powertools`** (Logger/Metrics/Tracer) instead of hand-rolled
-  `logging`/`print` calls — JSON-structured logs, automatic request/correlation IDs, and
-  CloudWatch Embedded Metric Format (EMF) for custom metrics without extra API calls or cost.
-  It's just a pip dependency; no new AWS resource.
-- Minimum fields per run: location, forecast fetch success/failure, readings written, alerts
-  evaluated, alerts sent vs. skipped-as-duplicate. Enough to answer "did today's run work?" from
-  CloudWatch Logs Insights without re-invoking anything.
+- Adopted **`aws-lambda-powertools`** (`Logger`/`Metrics`/`Tracer`) in all four Lambdas, replacing
+  the hand-rolled `logging.getLogger()` calls. Every log line is now JSON with a correlation ID
+  (`function_request_id`), cold-start flag, and whatever keyword fields the call site passed
+  (`logger.info("Stored readings for location", location_id=..., readings_written=...)`),
+  queryable from **CloudWatch Logs Insights** without re-invoking anything. `aws-xray-sdk` had to
+  be added alongside `aws-lambda-powertools` explicitly — Powertools' `Tracer` imports it lazily
+  and doesn't declare it as a hard dependency.
+- Each handler's `if __name__ == "__main__":` block used to call `handler(event, None)` for local
+  runs. Powertools' `Logger.inject_lambda_context` reads `function_name`/`aws_request_id`/etc.
+  straight off the context object, so `None` now raises `AttributeError` — fixed with a small
+  `common/local_context.py` (`LocalLambdaContext`, one shared fake context) rather than
+  duplicating a stub class in all four files.
 
 ### Metrics & alarms
 
-- Custom EMF metrics (free — well under the always-free custom-metrics allowance at this scale):
-  `AlertsSent`, `BreachesDetected`, `LocationsFailed` per run.
-- Alarms (first 10/month are always free; this project needs about five):
-  - Lambda `Errors` ≥ 1 (already in the template)
-  - Lambda `Throttles` ≥ 1
-  - Lambda `Duration` p99 approaching the configured timeout — catches a slow upstream API before
-    it becomes an outright timeout
-  - SES bounce/complaint rate — not just a cost concern; a high complaint rate risks SES pausing
-    your sending ability entirely
-  - EventBridge `FailedInvocations` on the schedule rule, as a backstop in case the trigger itself
-    (not the Lambda) fails
-- Route every alarm to **one SNS topic with an email subscription**, so "in ALARM" actually reaches
-  you instead of sitting unread in a console. SNS email delivery is free at this volume.
+- Custom EMF metrics, `AllergyTracker` namespace, dimensioned by `service` (free — CloudWatch's
+  Embedded Metric Format is a specially-shaped log line, no extra API call or cost beyond the
+  logging that already happens): `ingest` emits `LocationsFailed`/`ReadingsWritten`, `notify`
+  emits `AlertsSent`/`BreachesDetected`.
+- Six alarms (first 10/month are always free), all routed to one **SNS topic with an email
+  subscription** (`AlarmTopic`, the required `AlarmEmail` template parameter — AWS emails a
+  subscription-confirmation link after the first deploy that has to be clicked before alarms
+  actually notify anyone):
+  - `IngestFunctionErrorAlarm` — Lambda `Errors` ≥ 1 (already existed; now also wired to the SNS
+    topic instead of firing silently into the console)
+  - `IngestFunctionThrottleAlarm` — Lambda `Throttles` ≥ 1
+  - `IngestFunctionDurationAlarm` — `Duration` p99 ≥ 48s (80% of the 60s Globals timeout) —
+    catches a slow Pollen API before a run starts timing out outright
+  - `IngestScheduleFailedInvocationsAlarm` — EventBridge Scheduler `TargetErrorCount` ≥ 1, as a
+    backstop for the *trigger* failing rather than the Lambda. **Deviates from the plan as
+    originally written here**: the metric is `TargetErrorCount`, not `FailedInvocations` —
+    `FailedInvocations` belongs to classic EventBridge Rules (`AWS/Events`), not EventBridge
+    Scheduler (`AWS/Scheduler`), which is what `ScheduleV2` actually deploys. Scheduler also only
+    publishes metrics per schedule *group*, not per individual schedule, so the ingest schedule
+    now lives in its own dedicated `IngestScheduleGroup` (`allergy-tracker`) rather than the
+    account's shared "default" group, giving the alarm an unambiguous dimension to key off.
+  - `SesBounceRateAlarm` / `SesComplaintRateAlarm` — SES's automatic account-level
+    `Reputation.BounceRate`/`Reputation.ComplaintRate` metrics (`AWS/SES`, no configuration set
+    needed), thresholded at 5%/0.1% — below the ~10%/0.5% levels at which SES itself would
+    throttle or pause sending, so the alarm is the early warning, not the same signal twice.
+  - Scoped to ingest specifically (not duplicated across `notify`/`confirm`/`api`) rather than
+    aiming for one of every alarm type per function: ingest is the one Lambda talking to an
+    external API on an unattended schedule, the likeliest place for a silent failure to go
+    unnoticed. Six alarms stays close to the "about five" this phase was scoped for while every
+    one earns its place; extending `Errors`/`Throttles` to the other three functions is a cheap
+    future addition (still well under the free 10) if they turn out to need it.
 
 ### Cost-safe logging
 
-- Set an explicit **CloudWatch Logs retention period** (e.g. 14–30 days) on every Lambda's log
-  group in the SAM template. The default is "Never expire," which quietly accumulates storage
-  cost forever — a one-line fix per function.
+- `LogRetentionDays` (default 30) already existed on every Lambda's log group before this phase —
+  see "History range & retention" and the cost posture table above. No change needed here.
 
-### Tracing (defer until it's useful)
+### Tracing
 
-- Enable X-Ray (`Tracing: Active` in the SAM `Globals` block) once the Phase 4 Read API exists —
-  that's the point where a request actually spans more than one Lambda/service and tracing starts
-  paying for itself. 100k traces/month are free, well above this project's volume. Skip it while
-  there's only the single ingestion Lambda; tracing one function in isolation adds little.
+- `Tracing: Active` in the SAM `Globals.Function` block, now that the Phase 4 Read API exists and
+  a request can actually span more than one Lambda. 100k traces/month are free. `Policies` isn't
+  a Globals-supported property for `AWS::Serverless::Function` (`sam validate --lint` catches
+  this immediately if attempted), so each function declares its own `AWSXRayDaemonWriteAccess`
+  managed policy individually rather than once at the top.
 
 ### Dashboard
 
-- One CloudWatch dashboard (first 3/account are free forever): invocations/errors/duration per
-  Lambda, DynamoDB consumed capacity, and the custom `AlertsSent`/`BreachesDetected` metrics.
+- One CloudWatch dashboard (`allergy-tracker`, first 3/account are free forever, stack output
+  `DashboardUrl`): invocations/errors/duration per Lambda, DynamoDB consumed read/write capacity,
+  and the four custom EMF metrics above.
+
+### Verification
+
+- `python -m pytest` (58 tests) and `ruff check` pass unchanged — the pure functions the test
+  suite exercises were untouched; only logging/metrics/tracing wiring around them changed.
+- `sam validate --lint` passes on all three templates.
+- Each handler's `__main__` entry point smoke-tested locally end to end (`python -m
+  confirm.handler`, `python -m notify.handler`, plus an import check on `ingest`/`api`),
+  confirming structured JSON logs, EMF metric lines, and the cold-start metric all emit
+  correctly with the new `LocalLambdaContext`.
+- Not yet verified against the live deployed stack — `sam deploy` wasn't run as part of this
+  change; see docs/CONFIGURATION.md#observability-phase-7 for the `AlarmEmail` parameter needed
+  before deploying, and remember to confirm the SNS subscription email afterward.
 
 ### Nice-to-haves once the core loop works
 

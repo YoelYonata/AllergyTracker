@@ -10,4 +10,4 @@ s3_bucket = "aws-sam-cli-managed-default-samclisourcebucket-ryskqxxopokf"
 capabilities = "CAPABILITY_IAM"
 confirm_changeset = false
 no_fail_on_empty_changeset = true
-parameter_overrides = "SesSenderEmail=\"yoel.yonata@gmail.com\" CorsAllowOrigin=\"https://d3myi08baazbck.cloudfront.net\""
+parameter_overrides = "SesSenderEmail=\"yoel.yonata@gmail.com\" CorsAllowOrigin=\"https://d3myi08baazbck.cloudfront.net\" AlarmEmail=\"yoel.yonata@gmail.com\""

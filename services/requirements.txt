@@ -1,4 +1,6 @@
 requests
 boto3
 python-dotenv
+aws-lambda-powertools
+aws-xray-sdk
 pytest
