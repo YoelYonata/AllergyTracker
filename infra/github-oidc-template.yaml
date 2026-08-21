@@ -155,13 +155,33 @@ Resources:
                 Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/allergy-tracker-*
               - Effect: Allow
                 Action: [scheduler:*]
-                Resource: !Sub arn:${AWS::Partition}:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/*/allergy-tracker-*
+                Resource:
+                  - !Sub arn:${AWS::Partition}:scheduler:${AWS::Region}:${AWS::AccountId}:schedule/*/allergy-tracker-*
+                  # Distinct resource type/ARN shape from the schedule itself (schedule-group/
+                  # vs schedule/{group}/{name}) -- IngestScheduleGroup needs its own grant.
+                  - !Sub arn:${AWS::Partition}:scheduler:${AWS::Region}:${AWS::AccountId}:schedule-group/allergy-tracker
               - Effect: Allow
                 Action: [apigateway:*]
                 Resource: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis*
               - Effect: Allow
                 Action: [cloudwatch:PutMetricAlarm, cloudwatch:DeleteAlarms, cloudwatch:DescribeAlarms]
                 Resource: !Sub arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:allergy-tracker-*
+              # Dashboard ARNs have no region segment (account-scoped, not regional).
+              - Effect: Allow
+                Action: [cloudwatch:PutDashboard, cloudwatch:GetDashboard, cloudwatch:DeleteDashboards, cloudwatch:ListDashboards]
+                Resource: !Sub arn:${AWS::Partition}:cloudwatch::${AWS::AccountId}:dashboard/allergy-tracker
+              - Effect: Allow
+                Action:
+                  - sns:CreateTopic
+                  - sns:DeleteTopic
+                  - sns:GetTopicAttributes
+                  - sns:SetTopicAttributes
+                  - sns:Subscribe
+                  - sns:Unsubscribe
+                  - sns:ListSubscriptionsByTopic
+                  - sns:TagResource
+                  - sns:UntagResource
+                Resource: !Sub arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:allergy-tracker-alarms
               # CloudFormation creates/attaches the Lambda execution roles on this stack's
               # behalf -- iam:PassRole is what lets it hand those roles to Lambda, scoped to
               # the role-name prefix SAM generates, not */"*".
