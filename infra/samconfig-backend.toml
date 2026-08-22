@@ -9,7 +9,11 @@ region = "ca-central-1"
 s3_bucket = "aws-sam-cli-managed-default-samclisourcebucket-ryskqxxopokf"
 capabilities = "CAPABILITY_IAM"
 confirm_changeset = false
-no_fail_on_empty_changeset = true
+# A commit that touches only the UI produces an identical backend template, and CloudFormation
+# rejects an empty changeset. The flag is spelled after the click parameter name
+# (--fail-on-empty-changeset/--no-fail-on-empty-changeset -> fail_on_empty_changeset); SAM
+# silently ignores an unrecognised key, so `no_fail_on_empty_changeset` here did nothing.
+fail_on_empty_changeset = false
 # IngestSchedule is pinned explicitly, not left to the template default: for parameters absent
 # from this list `sam deploy` reuses the value already on the stack, so a changed default alone
 # would silently never reach a stack that was first deployed with the old one.

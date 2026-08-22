@@ -8,4 +8,8 @@ stack_name = "allergy-tracker-ui"
 region = "ca-central-1"
 s3_bucket = "aws-sam-cli-managed-default-samclisourcebucket-ryskqxxopokf"
 confirm_changeset = false
-no_fail_on_empty_changeset = true
+# Most commits leave this stack untouched, and CloudFormation rejects the resulting empty
+# changeset. The key is the click parameter name behind
+# --fail-on-empty-changeset/--no-fail-on-empty-changeset, i.e. `fail_on_empty_changeset`; SAM
+# silently ignores an unrecognised key, so `no_fail_on_empty_changeset` here did nothing.
+fail_on_empty_changeset = false
