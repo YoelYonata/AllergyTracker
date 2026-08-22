@@ -8,6 +8,12 @@ import { TrendChart, type HistoryRangeDays } from "./components/TrendChart";
 import { LogoIcon } from "./icons";
 import type { Location, Reading } from "./types";
 
+// Which city the dashboard opens on. Without this it would land on whatever sorts first --
+// DynamoDB returns the CONFIG#LOCATIONS items ordered by sort key, so that's Amsterdam, which is
+// first only by alphabet and means nothing to anyone. Falls back to the first location returned
+// if this id isn't in the list (e.g. it was removed from scripts/seed_locations.py).
+const DEFAULT_LOCATION_ID = "vancouver";
+
 export default function App() {
   const [locations, setLocations] = useState<Location[]>([]);
   const [selected, setSelected] = useState<string>("");
@@ -20,7 +26,10 @@ export default function App() {
     getLocations()
       .then((res) => {
         setLocations(res.locations);
-        if (res.locations.length > 0) setSelected(res.locations[0].location_id);
+        if (res.locations.length > 0) {
+          const preferred = res.locations.find((loc) => loc.location_id === DEFAULT_LOCATION_ID);
+          setSelected((preferred ?? res.locations[0]).location_id);
+        }
       })
       .catch((err) => setError(err instanceof Error ? err.message : "Failed to load locations."));
   }, []);
