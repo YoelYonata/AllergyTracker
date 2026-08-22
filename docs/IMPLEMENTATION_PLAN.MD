@@ -18,6 +18,7 @@ not just "cheap":
 | S3 + CloudFront | CloudFront's free tier (1 TB transfer + 10M requests/month) was made **permanent** in 2021, not a 12-month trial. S3 storage for a small React build is pennies. |
 | SSM Parameter Store (SecureString) | Free. This is *why* Phase 0/3 use Parameter Store instead of Secrets Manager, which charges ~$0.40/secret/month for a feature (rotation) this project doesn't need. |
 | CloudWatch Alarms/Dashboards | First 10 alarms and first 3 dashboards are free forever. Phase 7 stays under both. |
+| Google Pollen API | Not AWS, and the one cost that scales with city count — one request per city per ingest run. Covered by the Maps Platform $200/month free credit; see [Multi-city expansion](#multi-city-expansion) for the math that keeps it there. |
 
 **Things to deliberately avoid**, since they're the usual ways a "free" serverless project stops
 being free:
@@ -189,6 +190,48 @@ defaulted to 365) even though nothing ever read that far. Two changes, both free
   chart meaningful (a season, not a blurry year) more than about the dollars.
 - TTL deletion isn't instant -- DynamoDB documents it as "typically within 48 hours" of
   expiry -- so briefly having 91-92 days of data around is expected, not a bug.
+
+## Multi-city expansion ✅
+
+Went from Vancouver-only to 20 major cities worldwide. Almost none of this was a backend change:
+`ingest` already looped over `store.get_enabled_locations()`, the single-table key scheme is
+already partitioned by `LOC#<id>`, and `notify`/the read API were already location-parameterised.
+The only genuinely single-city things were the one-entry list in `scripts/seed_locations.py` and
+a UI that rendered a `<select>` because there was only ever one option in it.
+
+- **Schedule dropped from `rate(6 hours)` to `rate(1 day)`.** This is the change that keeps the
+  Google Pollen API — the only cost that scales with city count — inside the free credit. Each
+  run makes one request per city, so 20 cities went from ~2,400 requests/month at 6-hourly to
+  ~600/month daily. Losing intraday refreshes costs nothing real: every run already fetches
+  `FORECAST_DAYS` (3) days ahead, so a daily run still keeps today plus a two-day lookahead
+  current, and pollen forecasts don't meaningfully move within a day.
+- **Ingest `Timeout` raised 60s → 300s.** Locations are fetched sequentially (deliberately — one
+  bad city shouldn't abort the rest), so wall-clock scales linearly with city count. At ~1-2s per
+  Pollen API call, 20 cities is comfortable but 60s was not a safe ceiling. The
+  `IngestFunctionDurationAlarm` threshold moved with it (240s = 80% of the new timeout) — an
+  alarm still pinned to the old 60s would have fired on every healthy run.
+- **`IngestSchedule` is now pinned in `samconfig-backend.toml`, not left to the template
+  default.** For parameters absent from `parameter_overrides`, `sam deploy` reuses the value
+  already on the stack rather than picking up a changed default — so editing only the template
+  default would have silently left the live stack on `rate(6 hours)` forever. Worth remembering
+  for any future parameter default change: on an existing stack, defaults are not what deploys.
+- **Seeding moved into CI.** Tracked cities live in DynamoDB, not the stack, so `sam deploy`
+  alone never adds one. `deploy-backend` now re-runs `scripts/seed_locations.py` after the
+  deploy, making that script the source of truth — add a city, merge, done. The script is
+  idempotent (writes keyed by location id) but does reset `enabled` to true, so removing a city
+  means deleting it from the script rather than flipping the flag in the table.
+- **Threshold picker removed from the subscribe form.** Subscribers now pick only a city and get
+  alerts at the `DEFAULT_THRESHOLD` (UPI ≥ 3, "high"). The API still accepts and validates an
+  explicit `threshold`, so the per-subscriber column and `find_breaches` logic are untouched —
+  this narrows the *UI's* surface, not the data model, and the field stays available for testing
+  (`seed_subscriber.py --threshold 0`) and for restoring the control later.
+- **Picker became a search box.** A `<select>` is fine for one option and bad for twenty;
+  `LocationPicker` is now a filter-as-you-type combobox with keyboard navigation. It still reads
+  the same `GET /locations` response, so no API change.
+- **Not done:** parallelising ingest (sequential is fine well past 20 cities, and concurrent
+  calls would need Pollen API rate-limit handling), and per-subscriber multi-city subscriptions
+  (GSI1 already supports the query — see [`DATA_MODEL.md`](DATA_MODEL.md) access pattern 5 — but
+  the UI subscribes to one city at a time).
 
 ## Phase 5 — Web dashboard (React) ✅
 

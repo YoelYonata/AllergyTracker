@@ -81,6 +81,32 @@ Defense in depth, worth doing even though the key is stored safely on the AWS si
 | `DEFAULT_THRESHOLD` | Notify + api | No (default `3`) | Fallback UPI threshold if a subscriber has none set |
 | `SES_SENDER_EMAIL` | Notify + api | Yes | Verified SES identity used as the "From" address on alert and confirmation emails |
 | `CONFIRM_BASE_URL` | Api Lambda, and local `seed_subscriber.py` | Yes, to subscribe | The deployed `ConfirmFunction`'s Function URL. The template wires this into the api Lambda automatically; only set it by hand for local script runs — see the stack Outputs after `sam deploy` |
+| `VITE_API_BASE_URL` | UI build | Yes | Read API base the dashboard calls. Set to the real `ApiEndpoint` for production builds; set to `/api` for local dev so requests go through the Vite proxy below |
+| `VITE_DEV_API_PROXY_TARGET` | UI dev server only | No | Where `ui/vite.config.ts` proxies `/api` during `npm run dev`. Unset in production builds, where the proxy is not registered at all |
+
+### Why local dev proxies the API
+
+The deployed HTTP API's `CorsAllowOrigin` allows exactly one origin — the CloudFront domain — so a
+browser on `http://localhost:5173` calling it directly gets a preflight with no
+`access-control-allow-origin` header back, which React surfaces as a bare "Failed to fetch".
+
+Rather than loosening production CORS to accommodate development, `ui/.env.development.local`
+points the app at a same-origin `/api` prefix and `ui/vite.config.ts` proxies that to
+`VITE_DEV_API_PROXY_TARGET`. The proxy hop runs in Node, not the browser, so the same-origin
+policy never enters into it and the deployed API keeps its single-origin allowlist.
+
+Note that Vite ranks `.env.development.local` **above** `.env.local` in dev mode, so the value in
+`.env.local` is deliberately not what `npm run dev` uses. Production builds run in `production`
+mode, where `.env.development.local` is ignored entirely.
+
+## Tracked locations
+
+The list of cities the ingestion job fetches lives in DynamoDB under `pk = CONFIG#LOCATIONS`, not
+in the CloudFormation stack — so `sam deploy` alone never adds one.
+[`scripts/seed_locations.py`](../scripts/seed_locations.py) is the source of truth, and the
+`deploy-backend` CI job re-runs it after every `sam deploy` on `main`. Adding a city is therefore
+an edit to that script plus a merge; see [Adding a city](../README.MD#adding-a-city) for the full
+workflow and its two caveats (re-seeding resets `enabled`, and new cities have no back-history).
 
 ## Observability (Phase 7)
 

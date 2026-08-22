@@ -82,6 +82,19 @@ jobs:
       - uses: aws-actions/setup-sam@v2
       - run: sam build -t infra/template.yaml
       - run: sam deploy --config-file infra/samconfig-backend.toml
+      # The list of tracked cities lives in DynamoDB, not in the CloudFormation stack, so
+      # `sam deploy` on its own never picks up a city added to scripts/seed_locations.py.
+      # Re-seeding on every deploy keeps that script the single source of truth: add a city,
+      # merge, and it goes live. Runs after the deploy because the table has to exist first.
+      # Safe to repeat -- writes are keyed by location id, so they overwrite rather than
+      # duplicate. Note this also resets `enabled` to true, so a city disabled by hand in the
+      # table will come back; remove it from the script instead.
+      - name: Seed tracked locations
+        run: |
+          pip install boto3
+          python scripts/seed_locations.py
+        env:
+          DDB_TABLE_NAME: allergy-tracker
 
   deploy-frontend:
     needs: [build-ui, deploy-backend]

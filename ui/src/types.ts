@@ -37,7 +37,6 @@ export interface HistoryResponse {
 export interface SubscribePayload {
   email: string;
   location: string;
-  threshold: number;
 }
 
 export interface ApiErrorBody {

@@ -54,12 +54,54 @@
   color: var(--text-secondary);
 }
 
-.location-picker select {
+.location-picker__combobox {
+  position: relative;
+}
+
+.location-picker__combobox input {
   padding: 6px 10px;
   border-radius: 6px;
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text-primary);
+  width: 220px;
+}
+
+.location-picker__results {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 10;
+  width: 240px;
+  max-height: 260px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+
+.location-picker__option {
+  padding: 7px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--text-primary);
+}
+
+.location-picker__option--highlight {
+  background: var(--page);
+}
+
+.location-picker__option--selected {
+  font-weight: 600;
+}
+
+.location-picker__empty {
+  padding: 7px 10px;
+  color: var(--text-secondary);
 }
 
 .today-summary,

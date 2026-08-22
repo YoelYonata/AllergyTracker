@@ -131,7 +131,8 @@ sam deploy --guided -t infra/template.yaml \
 # AWS emails an SNS subscription-confirmation link to AlarmEmail after this -- click it, or the
 # CloudWatch alarms below have nowhere to actually send a notification.
 
-# Tell the ingestion job which locations to fetch
+# Tell the ingestion job which locations to fetch. Only needed for a manual/first deploy --
+# CI re-runs this on every push to main (see "Adding a city" below).
 DDB_TABLE_NAME=allergy-tracker python scripts/seed_locations.py
 
 # Trigger a run without waiting for the schedule
@@ -161,15 +162,30 @@ curl -X POST "$API/subscribe" -H 'Content-Type: application/json' \
 
 ### 6. Web dashboard (React)
 
-Location picker, today's-pollen cards (with per-allergen icons), a trend chart with a 30/90-day
+City search box, today's-pollen cards (with per-allergen icons), a trend chart with a 30/90-day
 range toggle, and a subscribe form — talks only to the read API above, never to DynamoDB directly.
 
 ```bash
 cd ui
 npm install
 cp .env.example .env.local   # fill in VITE_API_BASE_URL from the ApiEndpoint output above
+
+# For the dev server specifically, also create .env.development.local (both files are
+# gitignored, so a fresh clone has neither) -- see the note below for why:
+cat > .env.development.local <<'EOF'
+VITE_API_BASE_URL=/api
+VITE_DEV_API_PROXY_TARGET=<ApiEndpoint output>
+EOF
+
 npm run dev
 ```
+
+`npm run dev` does **not** call the API directly. `CorsAllowOrigin` on the deployed stack allows
+exactly one origin (the CloudFront domain), so a browser on `localhost:5173` gets a CORS failure
+that surfaces as "Failed to fetch". Instead, `ui/.env.development.local` points the app at a
+same-origin `/api` prefix and `ui/vite.config.ts` proxies that to `VITE_DEV_API_PROXY_TARGET` —
+the proxy runs in Node, so CORS never applies and production stays locked to one origin. Set
+`VITE_DEV_API_PROXY_TARGET` to your own `ApiEndpoint` if you deploy a separate stack.
 
 Hosted at https://d3myi08baazbck.cloudfront.net (S3 + CloudFront, `infra/hosting-template.yaml`).
 To redeploy after a change:
@@ -178,6 +194,39 @@ To redeploy after a change:
 npm run build
 aws s3 sync dist/ s3://<BucketName from the hosting stack output> --delete
 ```
+
+## Adding a city
+
+The set of tracked cities lives in DynamoDB (`pk = CONFIG#LOCATIONS`), not in the CloudFormation
+stack, and [`scripts/seed_locations.py`](scripts/seed_locations.py) is its single source of truth.
+The ingestion job fetches whatever is in that table with `enabled: true`, and the dashboard's
+search box lists whatever `GET /locations` returns — so adding a city is a one-file change:
+
+1. Add an entry to `LOCATIONS` in `scripts/seed_locations.py` (id, display name, lat/lng).
+2. Merge to `main`.
+
+The `deploy-backend` job re-runs the seed script after `sam deploy` on every push to `main`, so
+the new city is live without any manual step. Two things to know:
+
+- **Writes are keyed by location id**, so re-seeding overwrites rather than duplicates — the
+  script is safe to run repeatedly.
+- **Re-seeding resets `enabled` to `true`.** To stop tracking a city, remove it from the script
+  rather than flipping `enabled` by hand in the table, or the next deploy will turn it back on.
+
+A newly added city has no history until the ingestion job runs, so its trend chart starts nearly
+flat and fills in over the following days. To backfill immediately rather than waiting for the
+schedule, invoke ingest for just that city:
+
+```bash
+aws lambda invoke --cli-binary-format raw-in-base64-out \
+  --function-name allergy-tracker-ingest \
+  --payload '{"location_id":"<new-city-id>"}' /dev/stdout
+```
+
+Cost scales with city count × schedule frequency: each city is one Google Pollen API call per
+ingest run. At the default `rate(1 day)`, 20 cities is ~600 calls/month — comfortably inside the
+Maps Platform free credit. See the cost posture table in
+[`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.MD).
 
 ## Status
 
@@ -192,3 +241,4 @@ aws s3 sync dist/ s3://<BucketName from the hosting stack output> --delete
 | 6 — Deployment & CI | Done — `.github/workflows/ci.yml` tests/lints/builds on every PR and push, and `deploy-backend`/`deploy-frontend` have both gone green on push to `main` via GitHub OIDC (no long-lived AWS keys). Took three follow-up IAM fixes (GitHub's immutable org/repo IDs, an explicit artifacts bucket instead of `resolve_s3`, a `CreateChangeSet` permission on the SAM transform) — see [`IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md#phase-6--deployment--ci-) |
 | 7 — Observability & polish | Done — `aws-lambda-powertools` structured logging/EMF metrics/X-Ray tracing in all four Lambdas, six CloudWatch alarms (Lambda errors/throttles/duration, EventBridge Scheduler target errors, SES bounce/complaint rate) routed to one SNS topic, and a CloudWatch dashboard; see [`IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md#phase-7--observability--polish-) |
 | History range & retention | Done, ahead of Phase 7 — trend chart's history range is user-selectable (30/90 days) and DynamoDB TTL now caps stored readings at 90 days to match, down from 365; see [`IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md#history-range--retention) |
+| Multi-city expansion | Done — 20 cities worldwide (was Vancouver only), ingest schedule dropped to daily to keep Pollen API volume inside the free credit, location seeding moved into CI, search-box city picker, and the subscribe form's threshold input removed in favour of the UPI ≥ 3 default; verified by invoking ingest for all 20 cities against the live stack; see [`IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md#multi-city-expansion) |

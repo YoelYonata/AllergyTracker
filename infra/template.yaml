@@ -28,8 +28,11 @@ Parameters:
     Description: How many forecast days to fetch per run (Pollen API supports up to 5).
   IngestSchedule:
     Type: String
-    Default: rate(6 hours)
-    Description: EventBridge schedule for the ingestion job.
+    Default: rate(1 day)
+    Description: >
+      EventBridge schedule for the ingestion job. Daily is enough -- each run already fetches
+      ForecastDays days ahead per location, and with dozens of locations a daily cadence keeps
+      Google Pollen API request volume low (see cost posture note in docs/IMPLEMENTATION_PLAN.md).
   CorsAllowOrigin:
     Type: String
     Default: "*"
@@ -143,6 +146,10 @@ Resources:
       CodeUri: ../services/src/
       Handler: ingest.handler.handler
       Description: Fetches pollen forecasts and stores readings. Alerting is the notify function's job.
+      # Locations are fetched sequentially (one bad location shouldn't abort the rest -- see
+      # ingest/handler.py), so runtime scales with location count. Overrides the 60s Globals
+      # default with room for dozens of locations at ~1-2s per Pollen API call.
+      Timeout: 300
       Environment:
         Variables:
           DDB_TABLE_NAME: !Ref AllergyTrackerTable
@@ -211,8 +218,8 @@ Resources:
     Properties:
       AlarmName: allergy-tracker-ingest-duration
       AlarmDescription: >
-        Ingest p99 duration is approaching the function's configured timeout (Globals default,
-        60s) -- catches a slow Pollen API before a run starts timing out outright.
+        Ingest p99 duration is approaching the function's configured timeout (IngestFunction
+        override, 300s) -- catches a slow Pollen API before a run starts timing out outright.
       Namespace: AWS/Lambda
       MetricName: Duration
       Dimensions:
@@ -221,7 +228,7 @@ Resources:
       ExtendedStatistic: p99
       Period: 3600
       EvaluationPeriods: 1
-      Threshold: 48000  # 80% of the 60s Globals timeout, in milliseconds.
+      Threshold: 240000  # 80% of the 300s IngestFunction timeout, in milliseconds.
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
       AlarmActions: [!Ref AlarmTopic]

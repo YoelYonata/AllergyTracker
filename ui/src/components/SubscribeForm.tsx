@@ -9,14 +9,13 @@ type Status = { kind: "idle" } | { kind: "sending" } | { kind: "done"; message: 
 
 export function SubscribeForm({ locationId }: Props) {
   const [email, setEmail] = useState("");
-  const [threshold, setThreshold] = useState(3);
   const [status, setStatus] = useState<Status>({ kind: "idle" });
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     setStatus({ kind: "sending" });
     try {
-      const res = await subscribe({ email, location: locationId, threshold });
+      const res = await subscribe({ email, location: locationId });
       setStatus({ kind: "done", message: res.message });
     } catch (err) {
       setStatus({ kind: "error", message: err instanceof Error ? err.message : "Something went wrong." });
@@ -27,7 +26,7 @@ export function SubscribeForm({ locationId }: Props) {
     <form className="subscribe-form" onSubmit={onSubmit}>
       <h2>Get alerts</h2>
       <p className="subscribe-form__hint">
-        We'll email you when any watched pollen type crosses your threshold for this location.
+        We'll email you when any pollen type reaches a high level (UPI 3+) for this location.
       </p>
       <label>
         <span>Email</span>
@@ -37,17 +36,6 @@ export function SubscribeForm({ locationId }: Props) {
           value={email}
           onChange={(e) => setEmail(e.target.value)}
           placeholder="you@example.com"
-        />
-      </label>
-      <label>
-        <span>Alert threshold (UPI 0-5)</span>
-        <input
-          type="number"
-          min={0}
-          max={5}
-          required
-          value={threshold}
-          onChange={(e) => setThreshold(Number(e.target.value))}
         />
       </label>
       <button type="submit" disabled={status.kind === "sending"}>
